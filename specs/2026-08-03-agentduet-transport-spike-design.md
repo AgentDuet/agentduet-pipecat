@@ -118,11 +118,12 @@ AgentDuetTransport(call, params: TransportParams | None = None)
 
 ### Input transport (`BaseInputTransport`)
 
-- `start()`: set both sample rates from the call, start the `audio_stream()`
-  pump task, **then** `await session.start()` (answer), then
-  `set_transport_ready`. Starting the pump before answer is safe —
-  `audio_stream()` is documented order-independent and lazily bound — and
-  closes the first-words gap more tightly than answering first.
+- `start()`: `set_transport_ready` first (the input audio queue exists only
+  after it, and audio can arrive the instant `answer()` succeeds server-side),
+  then start the `audio_stream()` pump task, **then** `await session.start()`
+  (answer). Starting the pump before answer is safe — `audio_stream()` is
+  documented order-independent and lazily bound — and closes the first-words
+  gap more tightly than answering first.
 - Pump: `async for chunk in session.remote_party.audio_stream():` →
   `push_audio_frame(InputAudioRawFrame(chunk, rate, 1))`. The stream ends
   cleanly on termination (StopAsyncIteration), so the pump task just exits.
