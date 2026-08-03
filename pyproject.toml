@@ -1,0 +1,41 @@
+[project]
+name = "pipecat-agentduet"
+version = "0.1.0.dev0"
+description = "AgentDuet transport for Pipecat: phone/WhatsApp calls in any Pipecat pipeline"
+requires-python = ">=3.12"
+# The agentduet floor names a pre-release on purpose: a specifier that itself
+# carries one permits pre-releases of that package.
+dependencies = [
+    "agentduet>=1.0.0b10,<2",
+    "pipecat-ai>=1.7,<2",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/pipecat_agentduet"]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=1.0",
+    "pytest-timeout>=2.3",
+    "ruff>=0.8",
+]
+# Example-only deps (Silero pulls onnxruntime; keep it out of the test env).
+example = [
+    "pipecat-ai[silero]>=1.7,<2",
+    "python-dotenv>=1.0",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+# Backstop for async teardown tests: a deadlock fails with a stack dump
+# instead of hanging (mirrors the SDK repo's convention).
+timeout = 30
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
