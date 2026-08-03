@@ -4,6 +4,7 @@ import asyncio
 
 import pytest
 from agentduet import CallState
+from agentduet.exceptions import BufferFullError
 from pipecat.frames.frames import (
     Frame,
     InputAudioRawFrame,
@@ -165,3 +166,75 @@ class TestInputTransport:
         await worker.stop_when_done()  # graceful EndFrame path
         await asyncio.wait_for(run_task, timeout=5)
         assert call.close_calls >= 1  # transport closed the call, no user code
+
+
+# One 10 ms chunk at 16 kHz mono s16: 160 samples * 2 bytes. MediaSender
+# buffers output audio to audio_out_10ms_chunks x 10 ms before calling
+# write_audio_frame, so tests use chunk_size multiples and set the chunking
+# to 1 to make writes deterministic.
+CHUNK = 320
+
+
+def make_output_frame(pcm: bytes) -> OutputAudioRawFrame:
+    return OutputAudioRawFrame(audio=pcm, sample_rate=16000, num_channels=1)
+
+
+class TestOutputTransport:
+    async def _run_output(self, call: FakeCall):
+        transport = AgentDuetTransport(
+            call,
+            params=TransportParams(
+                audio_in_enabled=True,
+                audio_out_enabled=True,
+                audio_out_10ms_chunks=1,  # flush every 10 ms chunk
+            ),
+        )
+        output = transport.output()
+        worker = make_worker(Pipeline([output]))
+        run_task = await run_worker(worker)
+        await asyncio.sleep(0.1)  # StartFrame processed, answer done
+        return transport, output, worker, run_task
+
+    async def _finish(self, worker, run_task):
+        await worker.stop_when_done()
+        await asyncio.wait_for(run_task, timeout=5)
+
+    async def test_output_audio_reaches_send_audio_byte_identical(self):
+        call = FakeCall()
+        _transport, _output, worker, run_task = await self._run_output(call)
+        pcm = b"\x03\x04" * (CHUNK // 2)  # exactly one chunk
+        await worker.queue_frame(make_output_frame(pcm))
+        await asyncio.sleep(0.3)
+        assert b"".join(call.sent_audio) == pcm
+        await self._finish(worker, run_task)
+
+    async def test_buffer_full_drops_chunk_pipeline_survives(self):
+        call = FakeCall()
+        _transport, _output, worker, run_task = await self._run_output(call)
+        call.send_audio_error = BufferFullError("full")
+        await worker.queue_frame(make_output_frame(b"\x00" * CHUNK))
+        await asyncio.sleep(0.2)
+        call.send_audio_error = None
+        second = b"\x07\x08" * (CHUNK // 2)
+        await worker.queue_frame(make_output_frame(second))
+        await asyncio.sleep(0.2)
+        # First chunk dropped on BufferFullError, second delivered intact.
+        assert b"".join(call.sent_audio) == second
+        await self._finish(worker, run_task)
+
+    async def test_interruption_clears_buffer_without_blocking_frames(self):
+        call = FakeCall()
+        call.clear_delay = 5.0  # slow server ack: must NOT stall the pipeline
+        _transport, _output, worker, run_task = await self._run_output(call)
+
+        await worker.queue_frame(InterruptionFrame())
+        await asyncio.sleep(0.2)
+        assert call.clear_calls == 1  # clear was invoked...
+
+        # ...and the frame path is still live: audio written well before the
+        # 5 s ack resolves.
+        pcm = b"\x0a\x0b" * (CHUNK // 2)
+        await worker.queue_frame(make_output_frame(pcm))
+        await asyncio.sleep(0.3)
+        assert b"".join(call.sent_audio) == pcm
+        await self._finish(worker, run_task)

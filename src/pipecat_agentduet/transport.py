@@ -6,13 +6,17 @@ call lifecycle is owned by the shared _AgentDuetSession.
 """
 
 import logging
+import time
 
 from agentduet import CallEvent
+from agentduet.exceptions import BufferFullError, CallClosedError
 from pipecat.frames.frames import (
     CancelFrame,
     CancelWorkerFrame,
     EndFrame,
     InputAudioRawFrame,
+    InterruptionFrame,
+    OutputAudioRawFrame,
     StartFrame,
 )
 from pipecat.processors.frame_processor import FrameDirection
@@ -165,4 +169,57 @@ class AgentDuetOutputTransport(BaseOutputTransport):
         super().__init__(params, **kwargs)
         self._session = session
 
-    # Implemented in Task 8.
+    async def start(self, frame: StartFrame):
+        await super().start(frame)
+        await self._session.start()  # latched no-op if the input half won
+        await self.set_transport_ready(frame)
+
+    async def stop(self, frame: EndFrame):
+        await super().stop(frame)
+        await self._session.close()
+
+    async def cancel(self, frame: CancelFrame):
+        await super().cancel(frame)
+        await self._session.close()
+
+    async def write_audio_frame(self, frame: OutputAudioRawFrame) -> bool:
+        try:
+            await self._session.call.send_audio(frame.audio)
+            return True
+        except BufferFullError:
+            # Back-pressure, not teardown: the default ring buffer holds ~32 s
+            # at 16 kHz, so a full buffer means the server pull has stalled.
+            logger.warning("outgoing audio buffer full; dropping %d bytes", len(frame.audio))
+            return False
+        except CallClosedError:
+            # Termination races the send loop by design (SDK contract);
+            # teardown runs from the hangup event, not from here.
+            return False
+
+    async def process_frame(self, frame, direction: FrameDirection):
+        await super().process_frame(frame, direction)
+        if isinstance(frame, InterruptionFrame):
+            # Spawned, not awaited: the local ring-buffer flush inside is
+            # instant, but the agent.interrupt ack can take up to 10 s and
+            # must not stall the system-frame path. Residual race accepted:
+            # an ack landing after the next bot turn begins could flush that
+            # turn's audio, but the next turn needs a full STT->LLM->TTS
+            # round trip while the ack needs one network hop.
+            self.create_task(self._clear_remote_buffer())
+
+    async def _clear_remote_buffer(self):
+        started = time.monotonic()
+        try:
+            result = await self._session.call.clear_send_audio_buffer()
+        except CallClosedError:
+            return  # call over; nothing left to clear
+        elapsed_ms = (time.monotonic() - started) * 1000
+        if result:
+            # The two numbers the docs want: how much was flushed, how fast.
+            logger.info(
+                "barge-in: cleared %s buffered bytes, ack in %.0f ms",
+                result.payload,
+                elapsed_ms,
+            )
+        else:
+            logger.warning("agent.interrupt failed: %s", result.error_code)
