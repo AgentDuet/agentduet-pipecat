@@ -122,7 +122,16 @@ AgentDuetTransport(call, params: TransportParams | None = None)
 - Pump: `async for chunk in session.remote_party.audio_stream():` →
   `push_audio_frame(InputAudioRawFrame(chunk, rate, 1))`. The stream ends
   cleanly on termination (StopAsyncIteration), so the pump task just exits.
-- `stop`/`cancel`: cancel pump, `session.close()`.
+- `stop` (EndFrame): cancel pump, then `session.half_stopped()` — **not** an
+  immediate close. `BaseInputTransport` pushes EndFrame downstream *before*
+  calling `stop()`, so at that moment the farewell audio is still traversing
+  STT→LLM→TTS→output; closing the call here would drop it deterministically.
+  The session closes when the **last registered half** reports stopped
+  (Daily's `_leave_counter` pattern), which honors the parent spec's rule
+  "pipeline end reaching the *output* transport ⇒ `call.close()`" while
+  keeping input-only pipelines working (one registered half).
+- `cancel` (CancelFrame): cancel pump, `session.close()` immediately — cancel
+  means drop everything in flight.
 
 ### Output transport (`BaseOutputTransport`)
 
@@ -143,7 +152,28 @@ AgentDuetTransport(call, params: TransportParams | None = None)
   race: an ack landing after the *next* bot turn starts could flush that
   turn's audio; the next turn needs a full STT→LLM→TTS round trip while the
   ack needs one network hop, so this is accepted and noted in code.
-- `stop`/`cancel`: `session.close()`.
+- `stop` (EndFrame): `session.half_stopped()` — by the time
+  `BaseOutputTransport.stop()` returns, `MediaSender` has drained its queue
+  and appended end-silence, so audio already handed to the SDK is all that
+  remains in flight. `cancel` (CancelFrame): `session.close()` immediately.
+- Interruption clear tasks are tracked and cancelled in `stop`/`cancel` so a
+  barge-in shortly before hangup can't leave a task dangling past the worker
+  (production workers warn on dangling tasks by default).
+
+### Session half-latch
+
+`_AgentDuetSession` gains `register_half()` (called once per constructed
+transport half) and `half_stopped()` (EndFrame path). When every registered
+half has reported stopped, the session runs `close()`. `close()` itself stays
+public and immediate for the cancel path. Idempotence rules are unchanged —
+`_teardown()` remains the single choke point.
+
+**Open item for live validation (§8):** even with output-side close, audio
+already handed to the SDK sits in its client ring buffer (~32 s capacity,
+written faster than real time); `call.close()` drops that buffer locally.
+Whether a farewell fully plays out depends on how fast the server pull drains
+it — measure on a live call; if it truncates, the SDK may need a
+drain-before-close, which is an SDK feature request, not transport code.
 
 ## 4. Teardown matrix
 
@@ -168,7 +198,8 @@ The invariants, then the rows the tests pin one by one:
 | `answer()` returns falsy | fire `on_dialin_error` with the real `CommandResult`; push `CancelWorkerFrame`; connected/disconnect events never fire |
 | `answer()` truthy but teardown latch already set (hangup raced the answer) | suppress connected events; disconnect path has already run or will run from the hangup event |
 | Answered, remote hangup | `on_hangup` → `_teardown()`: `on_before_disconnect` → disconnect events → cancel pump → push `CancelWorkerFrame` |
-| Pipeline ends/cancels first | output `stop()`/`cancel()` → `session.close()` (sets `_self_initiated`) → `call.close()` → resulting hangup runs `_teardown()`: events fire once, **no** worker cancel |
+| Pipeline **ends** first (EndFrame) | each half reports `half_stopped()` as EndFrame reaches it; when the last registered half stops, the session runs `close()` (sets `_self_initiated`) → `call.close()` → `_teardown()`: events fire once, **no** worker cancel. Audio in flight between input and output is preserved. |
+| Pipeline **cancelled** first (CancelFrame) | first half to see it calls `session.close()` immediately (sets `_self_initiated`); same event behaviour, everything in flight is dropped by design |
 
 ## 5. Event surface (spike subset)
 
