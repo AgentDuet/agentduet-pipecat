@@ -17,6 +17,9 @@
 - `CancelWorkerFrame(reason=...)` pushed from either direction reaches the worker and becomes a `CancelFrame`.
 - `MediaSender` resamples output frames to the transport rate automatically — differing `PipelineParams` rates are normal, not an error.
 - `UserTurnProcessor()` (bare; interruptions default on via the start strategy) broadcasts `UserStoppedSpeakingFrame` on turn stop.
+- `_register_event_handler(name)` defaults to `sync=False`, which runs handlers **fire-and-forget in a task**. Register with `sync=True` so handlers are awaited inline — required for the "on_before_disconnect completes before disconnect events" invariant and the alias pair's "one moment" ordering.
+- `MediaSender` buffers output audio into `audio_out_10ms_chunks` × 10 ms chunks (default 4 → 1280 bytes at 16 kHz mono) before calling `write_audio_frame`. Tests that assert on written audio must set `audio_out_10ms_chunks=1` and queue exact 10 ms multiples (320 bytes at 16 kHz).
+- `BaseInputTransport._audio_in_queue` exists only after `set_transport_ready()` — `push_audio_frame` before that raises `AttributeError`. The input half must call `set_transport_ready` **before** starting the pump.
 - `WorkerRunner()` constructs with defaults; `await runner.run(worker)` returns when the worker finishes (`auto_end=True` default).
 - SDK: `CommandResult` is truthy on success; `answer()` raises `CallClosedError` when the call is over; `send_audio` raises `BufferFullError` / `CallClosedError`; `clear_send_audio_buffer()` flushes the local ring buffer instantly then awaits the `agent.interrupt` ack (10 s timeout), returning `payload=bytes_cleared`; `call.close()` fires `on_hangup` only when a voice WS was open; `on_hangup` handlers take one argument.
 
@@ -594,7 +597,7 @@ Expected: FAIL — `AttributeError: '_AgentDuetSession' object has no attribute 
 - [ ] **Step 4: Run tests**
 
 Run: `uv run pytest tests/test_session.py -v`
-Expected: `TestStart` tests that don't touch teardown PASS; the two involving `trigger_hangup` FAIL with `NotImplementedError` — that's the Task 5 seam. If anything else fails, fix before moving on.
+Expected: all `TestStart` tests PASS except `test_hangup_racing_truthy_answer_suppresses_connected`, which FAILS with `NotImplementedError` — its `trigger_hangup` fires the registered `on_hangup` → the `_teardown` stub. (`test_dead_before_start` hangs up *before* `start()` registers the handler, so it never reaches the stub and passes.) That one failure is the Task 5 seam; if anything else fails, fix before moving on.
 
 - [ ] **Step 5: Commit**
 
@@ -809,7 +812,9 @@ class TestEventAliases:
         assert [name for name, _ in seen] == ["native", "generic"]
         assert seen[0][1] is seen[1][1]  # identical payload object
 
-    async def test_all_v1_event_names_registerable(self):
+    async def test_all_v1_event_names_registered(self):
+        # add_event_handler on an unknown name only warns, so pin the
+        # registry directly.
         transport = AgentDuetTransport(FakeCall())
         for name in [
             "on_client_connected", "on_client_disconnected",
@@ -817,9 +822,7 @@ class TestEventAliases:
             "on_dialout_answered", "on_dialout_stopped", "on_dialout_error",
             "on_error", "on_call_state_updated", "on_before_disconnect",
         ]:
-            @transport.event_handler(name)
-            async def handler(t, *args):
-                pass
+            assert name in transport._event_handlers
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -903,17 +906,21 @@ class AgentDuetTransport(BaseTransport):
                     f"{rate}. The rate is set once, in CallAudioConfig; do not set it "
                     f"on the transport."
                 )
-        # Single source of truth: the call's rate wins everywhere.
-        params.audio_in_sample_rate = rate
-        params.audio_out_sample_rate = rate
-        self._params = params
+        # Single source of truth: the call's rate wins everywhere. Copy so
+        # the caller's params object isn't mutated behind their back.
+        self._params = params.model_copy(
+            update={"audio_in_sample_rate": rate, "audio_out_sample_rate": rate}
+        )
         self._session = _AgentDuetSession(call, self)
         self._input: AgentDuetInputTransport | None = None
         self._output: AgentDuetOutputTransport | None = None
 
         call.on_call_event(CallEvent.ERROR)(self._on_call_error)
         for name in _EVENT_NAMES:
-            self._register_event_handler(name)
+            # sync=True: handlers run awaited, not fire-and-forget in a task.
+            # This is what makes "on_before_disconnect completes before the
+            # disconnect events" and the alias pair's one-moment ordering real.
+            self._register_event_handler(name, sync=True)
 
     @property
     def call(self):
@@ -1032,11 +1039,14 @@ class FrameCapture(FrameProcessor):
 
 def make_worker(pipeline: Pipeline) -> PipelineWorker:
     # Lean worker for tests: no idle cancel, no RTVI/turn-tracking extras.
+    # check_dangling_tasks off: the spawned barge-in clear task may outlive
+    # a short test worker by design (Task 8's 5 s slow-ack test).
     return PipelineWorker(
         pipeline,
         idle_timeout_secs=None,
         enable_rtvi=False,
         enable_turn_tracking=False,
+        check_dangling_tasks=False,
     )
 
 
@@ -1099,11 +1109,13 @@ Expected: FAIL — input half has no `start()`; no audio frames captured / worke
 ```python
     async def start(self, frame: StartFrame):
         await super().start(frame)
+        # Ready first: _audio_in_queue exists only after set_transport_ready,
+        # and audio can arrive the instant answer() succeeds server-side.
+        await self.set_transport_ready(frame)
         # Pump before answer: audio_stream() is order-independent and lazily
         # bound, so no first words are dropped while the pipeline wires up.
         self._pump_task = self.create_task(self._pump())
         await self._session.start()
-        await self.set_transport_ready(frame)
 
     async def stop(self, frame: EndFrame):
         await super().stop(frame)
@@ -1156,9 +1168,29 @@ git commit -m "feat: input transport - audio pump, hangup cancel, close on end"
 from agentduet.exceptions import BufferFullError
 
 
+# One 10 ms chunk at 16 kHz mono s16: 160 samples * 2 bytes. MediaSender
+# buffers output audio to audio_out_10ms_chunks x 10 ms before calling
+# write_audio_frame, so tests use chunk_size multiples and set the chunking
+# to 1 to make writes deterministic.
+CHUNK = 320
+
+
+def make_output_frame(pcm: bytes) -> OutputAudioRawFrame:
+    return OutputAudioRawFrame(audio=pcm, sample_rate=16000, num_channels=1)
+
+
 class TestOutputTransport:
     async def _run_output(self, call: FakeCall):
-        transport = AgentDuetTransport(call)
+        from pipecat.transports.base_transport import TransportParams
+
+        transport = AgentDuetTransport(
+            call,
+            params=TransportParams(
+                audio_in_enabled=True,
+                audio_out_enabled=True,
+                audio_out_10ms_chunks=1,  # flush every 10 ms chunk
+            ),
+        )
         output = transport.output()
         worker = make_worker(Pipeline([output]))
         run_task = await run_worker(worker)
@@ -1172,10 +1204,8 @@ class TestOutputTransport:
     async def test_output_audio_reaches_send_audio_byte_identical(self):
         call = FakeCall()
         transport, output, worker, run_task = await self._run_output(call)
-        pcm = b"\x03\x04" * 160
-        await worker.queue_frame(
-            OutputAudioRawFrame(audio=pcm, sample_rate=16000, num_channels=1)
-        )
+        pcm = b"\x03\x04" * (CHUNK // 2)  # exactly one chunk
+        await worker.queue_frame(make_output_frame(pcm))
         await asyncio.sleep(0.3)
         assert b"".join(call.sent_audio) == pcm
         await self._finish(worker, run_task)
@@ -1184,16 +1214,14 @@ class TestOutputTransport:
         call = FakeCall()
         transport, output, worker, run_task = await self._run_output(call)
         call.send_audio_error = BufferFullError("full")
-        await worker.queue_frame(
-            OutputAudioRawFrame(audio=b"\x00" * 320, sample_rate=16000, num_channels=1)
-        )
+        await worker.queue_frame(make_output_frame(b"\x00" * CHUNK))
         await asyncio.sleep(0.2)
         call.send_audio_error = None
-        await worker.queue_frame(
-            OutputAudioRawFrame(audio=b"\x07\x08", sample_rate=16000, num_channels=1)
-        )
+        second = b"\x07\x08" * (CHUNK // 2)
+        await worker.queue_frame(make_output_frame(second))
         await asyncio.sleep(0.2)
-        assert call.sent_audio == [b"\x07\x08"]  # first dropped, second delivered
+        # First chunk dropped on BufferFullError, second delivered intact.
+        assert b"".join(call.sent_audio) == second
         await self._finish(worker, run_task)
 
     async def test_interruption_clears_buffer_without_blocking_frames(self):
@@ -1207,11 +1235,10 @@ class TestOutputTransport:
 
         # ...and the frame path is still live: audio written well before the
         # 5 s ack resolves.
-        await worker.queue_frame(
-            OutputAudioRawFrame(audio=b"\x0a\x0b", sample_rate=16000, num_channels=1)
-        )
+        pcm = b"\x0a\x0b" * (CHUNK // 2)
+        await worker.queue_frame(make_output_frame(pcm))
         await asyncio.sleep(0.3)
-        assert call.sent_audio == [b"\x0a\x0b"]
+        assert b"".join(call.sent_audio) == pcm
         await self._finish(worker, run_task)
 ```
 
@@ -1416,6 +1443,9 @@ async def run_call(sm: SessionManager, noti: IncomingCallNotification):
             transport.output(),
         ]
     )
+    # idle_timeout off (a silent caller isn't an idle pipeline); RTVI and
+    # turn-tracking stay at their defaults — the tests disable them only
+    # for isolation.
     worker = PipelineWorker(pipeline, idle_timeout_secs=None)
     runner = WorkerRunner(handle_sigint=False)
     await runner.run(worker)
