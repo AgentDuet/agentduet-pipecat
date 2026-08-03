@@ -76,3 +76,64 @@ class _AgentDuetSession:
             call_id=self._call.id,
             state=self._call.state,
         )
+
+    async def start(self) -> None:
+        """Answer the call. Latched: the first caller answers, later callers
+        wait for completion. Fires connected events only on a truthy answer
+        with no teardown racing it."""
+        if self._start_begun:
+            await self._start_complete.wait()
+            return
+        self._start_begun = True
+        try:
+            # Hangup can arrive in any state, including mid-answer: register
+            # the handler before answering so the window is closed.
+            self._call.on_hangup(self._on_hangup)
+            if self._call.state == CallState.TERMINATED:
+                await self._fail_start(_terminated_result())
+                return
+            try:
+                result = await self._call.answer()
+            except CallClosedError:
+                await self._fail_start(_terminated_result())
+                return
+            if not result:
+                await self._fail_start(result)
+                return
+            if self._torn_down or self._call.state == CallState.TERMINATED:
+                # A hangup raced the truthy answer; teardown ran (or will run)
+                # from on_hangup. Connected events must never fire.
+                return
+            self._connected_fired = True
+            await self._notifier._fire("on_dialin_connected", self._payload())
+            await self._fire_state()
+        finally:
+            self._start_complete.set()
+
+    async def _fail_start(self, result: CommandResult) -> None:
+        already_torn_down = self._torn_down
+        self._torn_down = True
+        await self._notifier._fire("on_dialin_error", result)
+        if not already_torn_down:
+            await self._fire_state()
+        await self._request_cancel("answer failed")
+
+    async def _fire_state(self) -> None:
+        state = self._call.state
+        if state == CallState.TERMINATED:
+            if self._terminal_state_fired:
+                return
+            self._terminal_state_fired = True
+        await self._notifier._fire("on_call_state_updated", state)
+
+    async def _request_cancel(self, reason: str) -> None:
+        if self._cancel_requested:
+            return
+        self._cancel_requested = True
+        await self._notifier._request_worker_cancel(reason)
+
+    async def _on_hangup(self, _payload) -> None:
+        await self._teardown()
+
+    async def _teardown(self) -> None:
+        raise NotImplementedError  # next slice
