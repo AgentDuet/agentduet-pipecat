@@ -8,7 +8,13 @@ call lifecycle is owned by the shared _AgentDuetSession.
 import logging
 
 from agentduet import CallEvent
-from pipecat.frames.frames import CancelWorkerFrame
+from pipecat.frames.frames import (
+    CancelFrame,
+    CancelWorkerFrame,
+    EndFrame,
+    InputAudioRawFrame,
+    StartFrame,
+)
 from pipecat.processors.frame_processor import FrameDirection
 from pipecat.transports.base_input import BaseInputTransport
 from pipecat.transports.base_output import BaseOutputTransport
@@ -119,7 +125,37 @@ class AgentDuetInputTransport(BaseInputTransport):
         self._session = session
         self._pump_task = None
 
-    # Implemented in Task 7.
+    async def start(self, frame: StartFrame):
+        await super().start(frame)
+        # Ready first: _audio_in_queue exists only after set_transport_ready,
+        # and audio can arrive the instant answer() succeeds server-side.
+        await self.set_transport_ready(frame)
+        # Pump before answer: audio_stream() is order-independent and lazily
+        # bound, so no first words are dropped while the pipeline wires up.
+        self._pump_task = self.create_task(self._pump())
+        await self._session.start()
+
+    async def stop(self, frame: EndFrame):
+        await super().stop(frame)
+        await self._shutdown()
+
+    async def cancel(self, frame: CancelFrame):
+        await super().cancel(frame)
+        await self._shutdown()
+
+    async def _pump(self):
+        rate = self._session.sample_rate
+        # Ends cleanly on termination: the stream raises StopAsyncIteration.
+        async for chunk in self._session.remote_party.audio_stream():
+            await self.push_audio_frame(
+                InputAudioRawFrame(audio=chunk, sample_rate=rate, num_channels=1)
+            )
+
+    async def _shutdown(self):
+        if self._pump_task is not None:
+            await self.cancel_task(self._pump_task)
+            self._pump_task = None
+        await self._session.close()
 
 
 class AgentDuetOutputTransport(BaseOutputTransport):
