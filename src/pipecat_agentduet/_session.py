@@ -135,5 +135,26 @@ class _AgentDuetSession:
     async def _on_hangup(self, _payload) -> None:
         await self._teardown()
 
+    async def close(self) -> None:
+        """Self-initiated close (pipeline ended/cancelled). Fires disconnect
+        events but never a worker cancel — the pipeline is already going down."""
+        self._self_initiated = True
+        try:
+            await self._call.close()
+        finally:
+            # call.close() only fires on_hangup when a voice WS was open; run
+            # teardown directly so events fire on every path (idempotent).
+            await self._teardown()
+
     async def _teardown(self) -> None:
-        raise NotImplementedError  # next slice
+        if self._torn_down:
+            return
+        self._torn_down = True
+        if self._connected_fired:
+            payload = self._payload()
+            # Awaited: the app's last chance to flush/log before disconnect.
+            await self._notifier._fire("on_before_disconnect", payload)
+            await self._notifier._fire("on_dialin_stopped", payload)
+        await self._fire_state()
+        if not self._self_initiated:
+            await self._request_cancel("remote hangup")

@@ -2,11 +2,10 @@
 
 import asyncio
 
-import pytest
 from agentduet import CallState, CommandResult
 from agentduet.exceptions import CallClosedError
 
-from pipecat_agentduet._session import _AgentDuetSession, CallEventPayload
+from pipecat_agentduet._session import CallEventPayload, _AgentDuetSession
 from tests.fakes import FakeCall, RecordingNotifier
 
 
@@ -101,3 +100,70 @@ class TestStart:
         names = notifier.names()
         assert "on_dialin_connected" not in names
         assert "on_client_connected" not in names
+
+
+class TestTeardown:
+    async def test_remote_hangup_fires_ordered_disconnect_and_cancel(self):
+        session, call, notifier = make_session()
+        await session.start()
+        notifier.events.clear()
+        await call.trigger_hangup()
+        names = notifier.names()
+        # on_before_disconnect strictly precedes the disconnect events.
+        assert names.index("on_before_disconnect") < names.index("on_dialin_stopped")
+        assert notifier.cancel_reasons == ["remote hangup"]
+
+    async def test_disconnect_fires_exactly_once_under_double_hangup(self):
+        session, call, notifier = make_session()
+        await session.start()
+        await call.trigger_hangup()
+        await session._teardown()  # simulate any second path racing in
+        assert notifier.names().count("on_dialin_stopped") == 1
+        assert notifier.names().count("on_before_disconnect") == 1
+
+    async def test_self_initiated_close_fires_events_but_never_cancel(self):
+        session, call, notifier = make_session()
+        await session.start()
+        notifier.events.clear()
+        await session.close()
+        assert "on_dialin_stopped" in notifier.names()
+        assert notifier.cancel_reasons == []  # our own close: no worker cancel
+        assert call.close_calls == 1
+
+    async def test_close_without_hangup_event_still_tears_down(self):
+        # FakeCall.close() fires no hangup (voice WS never opened): teardown
+        # must still run, driven by close() itself.
+        session, _call, notifier = make_session()
+        await session.start()
+        await session.close()
+        assert "on_dialin_stopped" in notifier.names()
+
+    async def test_hangup_after_close_does_not_double_fire(self):
+        session, call, notifier = make_session()
+        await session.start()
+        await session.close()
+        await call.trigger_hangup()  # late transport-drop event
+        assert notifier.names().count("on_dialin_stopped") == 1
+
+    async def test_never_connected_call_gets_no_disconnect_events(self):
+        # Falsy answer, then the hangup event lands: on_dialin_error already
+        # reported it; disconnect events must not fire (alias-pair rule).
+        session, call, notifier = make_session()
+        call.answer_result = CommandResult(success=False, error_code="TIMEOUT")
+        await session.start()
+        await call.trigger_hangup()
+        names = notifier.names()
+        assert "on_dialin_stopped" not in names
+        assert "on_before_disconnect" not in names
+        assert len(notifier.cancel_reasons) == 1  # cancel exactly once
+
+    async def test_terminal_state_update_fires_once(self):
+        session, call, notifier = make_session()
+        await session.start()
+        await call.trigger_hangup()
+        await session._teardown()
+        terminated = [
+            p for n, p in notifier.events
+            if n == "on_call_state_updated" and p == CallState.TERMINATED
+        ]
+        assert len(terminated) == 1
