@@ -19,6 +19,13 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 logger = logging.getLogger("probe")
 
 
+def _require_env(name: str) -> str:
+    value = os.getenv(name)
+    if not value:
+        raise SystemExit(f"set {name} in the environment or .env")
+    return value
+
+
 async def count_bytes(name: str, party, results: dict):
     total = 0
     try:
@@ -31,16 +38,20 @@ async def count_bytes(name: str, party, results: dict):
 
 
 async def main():
+    api_key = _require_env("AGENTDUET_API_KEY")
+    connector_uuid = _require_env("AGENTDUET_CONNECTOR_UUID")
+    probe_subscriber = _require_env("PROBE_SUBSCRIBER")
+    probe_dest = _require_env("PROBE_DEST")
     config = SessionManagerConfig.create(
-        api_key=os.environ["AGENTDUET_API_KEY"],
-        connector_uuid=os.environ["AGENTDUET_CONNECTOR_UUID"],
+        api_key=api_key,
+        connector_uuid=connector_uuid,
         base_url=os.getenv("AGENTDUET_BASE_URL"),
         call_audio=CallAudioConfig(sample_rate=16000),
     )
     async with SessionManager(config) as sm:
-        session = await sm.open_session(uuid.uuid4().hex, os.environ["PROBE_SUBSCRIBER"])
-        call = await session.make_call(Address.telco(os.environ["PROBE_DEST"]))
-        logger.info("dialing %s (call %s)…", os.environ["PROBE_DEST"], call.id)
+        session = await sm.open_session(uuid.uuid4().hex, probe_subscriber)
+        call = await session.make_call(Address.telco(probe_dest))
+        logger.info("dialing %s (call %s)…", probe_dest, call.id)
         result = await call.dial()
         if not result:
             logger.error("dial failed: %s", result.error_code)

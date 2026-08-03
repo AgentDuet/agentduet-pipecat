@@ -48,6 +48,15 @@ logger = logging.getLogger("inbound_tone_bot")
 
 SAMPLE_RATE = 16000  # Silero VAD supports 8k/16k only; 16k is the default
 
+_call_tasks: set[asyncio.Task] = set()
+
+
+def _require_env(name: str) -> str:
+    value = os.getenv(name)
+    if not value:
+        raise SystemExit(f"set {name} in the environment or .env")
+    return value
+
 
 class ToneBot(FrameProcessor):
     """Plays a sine tone after each user turn; stops it on interruption."""
@@ -122,9 +131,11 @@ async def run_call(sm: SessionManager, noti: IncomingCallNotification):
 
 async def main():
     load_dotenv()
+    api_key = _require_env("AGENTDUET_API_KEY")
+    connector_uuid = _require_env("AGENTDUET_CONNECTOR_UUID")
     config = SessionManagerConfig.create(
-        api_key=os.environ["AGENTDUET_API_KEY"],
-        connector_uuid=os.environ["AGENTDUET_CONNECTOR_UUID"],
+        api_key=api_key,
+        connector_uuid=connector_uuid,
         base_url=os.getenv("AGENTDUET_BASE_URL"),
         call_audio=CallAudioConfig(sample_rate=SAMPLE_RATE),
     )
@@ -133,7 +144,19 @@ async def main():
         @sm.on_incoming_call
         async def on_call(noti: IncomingCallNotification):
             # Own task: never block the SDK event bus for the call's duration.
-            asyncio.create_task(run_call(sm, noti))
+            # Tracked (not fire-and-forget): a bare create_task() holds no
+            # reference (GC risk) and swallows exceptions until GC logs
+            # "Task exception was never retrieved" — a misconfigured
+            # connector would otherwise fail as silent dead air.
+            task = asyncio.create_task(run_call(sm, noti))
+            _call_tasks.add(task)
+
+            def _done(t: asyncio.Task) -> None:
+                _call_tasks.discard(t)
+                if not t.cancelled() and t.exception() is not None:
+                    logger.exception("call handler crashed", exc_info=t.exception())
+
+            task.add_done_callback(_done)
 
         logger.info("listening for calls…")
         await sm.run_forever()

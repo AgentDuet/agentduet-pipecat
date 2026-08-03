@@ -103,9 +103,13 @@ AgentDuetTransport(call, params: TransportParams | None = None)
 - `params` defaults to audio in+out enabled.
 - Constructor **raises** if user-set `audio_in_sample_rate` /
   `audio_out_sample_rate` conflict with `call.audio_config.sample_rate` — the
-  parent spec's "no second place to type a rate" rule, enforced. A conflicting
-  rate arriving via `StartFrame` (from `PipelineParams`) logs a warning and the
-  call's rate wins (raising mid-pipeline helps no one).
+  parent spec's "no second place to type a rate" rule, enforced. A
+  `StartFrame` rate is ignored without a warning — the call's rate always
+  wins because the constructor writes it into `TransportParams`. (No warning
+  by design: `StartFrame.audio_out_sample_rate` defaults to 24000, so warning
+  on mismatch would fire spuriously on every default-config run, and
+  differing pipeline rates are legitimate — Pipecat resamples at the
+  transport seam.)
 - Exposes `transport.call` for SDK capabilities.
 - Owns the event registry (`_register_event_handler`); a single
   `_fire(native_name, payload)` helper also invokes the generic twin, making
