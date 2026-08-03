@@ -92,6 +92,18 @@ class TestEventAliases:
         ]:
             assert name in transport._event_handlers
 
+    async def test_call_error_forwards_to_on_error(self):
+        call = FakeCall()
+        transport = AgentDuetTransport(call)
+        seen = []
+
+        @transport.event_handler("on_error")
+        async def on_error(t, data):
+            seen.append(data)
+
+        await call.trigger_error({"code": "boom"})
+        assert seen == [{"code": "boom"}]
+
 
 class FrameCapture(FrameProcessor):
     """Terminal processor that records every frame it sees."""
@@ -121,7 +133,8 @@ def make_worker(pipeline: Pipeline) -> PipelineWorker:
 
 async def run_worker(worker: PipelineWorker) -> asyncio.Task:
     runner = WorkerRunner(handle_sigint=False)
-    task = asyncio.create_task(runner.run(worker))
+    await runner.add_workers(worker)
+    task = asyncio.create_task(runner.run())
     return task
 
 
@@ -238,3 +251,37 @@ class TestOutputTransport:
         await asyncio.sleep(0.3)
         assert b"".join(call.sent_audio) == pcm
         await self._finish(worker, run_task)
+
+
+class TestDualHalfLifecycle:
+    async def test_endframe_does_not_close_call_until_output_stops(self):
+        # EndFrame reaching the input half must NOT close the call: farewell
+        # audio queued ahead of EndFrame has to reach the output half first.
+        call = FakeCall()
+        transport = AgentDuetTransport(
+            call,
+            params=TransportParams(
+                audio_in_enabled=True,
+                audio_out_enabled=True,
+                audio_out_10ms_chunks=1,
+                # Default 2 s of post-EndFrame silence (real Pipecat behaviour,
+                # BaseOutputTransport.MediaSender._send_silence) would land in
+                # call.sent_audio after the farewell and break the exact byte
+                # match below; this test is about ordering, not silence, so
+                # turn it off rather than weaken the assertion.
+                audio_out_end_silence_secs=0,
+            ),
+        )
+        worker = make_worker(Pipeline([transport.input(), transport.output()]))
+        run_task = await run_worker(worker)
+        await asyncio.sleep(0.1)
+
+        farewell = b"\x05\x06" * (CHUNK // 2)
+        await worker.queue_frame(make_output_frame(farewell))
+        await worker.stop_when_done()
+        await asyncio.wait_for(run_task, timeout=5)
+
+        # The farewell survived EndFrame passing the input half...
+        assert b"".join(call.sent_audio) == farewell
+        # ...and the call still closed once both halves stopped.
+        assert call.close_calls >= 1

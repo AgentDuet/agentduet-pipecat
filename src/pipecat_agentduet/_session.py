@@ -52,6 +52,12 @@ class _AgentDuetSession:
         self._self_initiated = False
         self._cancel_requested = False
         self._terminal_state_fired = False
+        # Half-latch (Daily's _leave_counter pattern): the session only
+        # self-closes once every constructed transport half has reported its
+        # EndFrame stop, so farewell audio in flight between input and output
+        # isn't dropped by an early close.
+        self._registered_halves = 0
+        self._stopped_halves = 0
 
     @property
     def call(self):
@@ -142,6 +148,25 @@ class _AgentDuetSession:
 
     async def _on_hangup(self, _payload) -> None:
         await self._teardown()
+
+    def register_half(self) -> None:
+        """Called once per constructed transport half (input/output).
+
+        Tracks how many halves must report ``half_stopped()`` before the
+        session closes the call on the graceful EndFrame path.
+        """
+        self._registered_halves += 1
+
+    async def half_stopped(self) -> None:
+        """A transport half finished its EndFrame stop.
+
+        When every registered half has reported, self-close — this is the
+        graceful (non-cancel) path, so audio already handed off between
+        halves gets a chance to actually be sent before the call closes.
+        """
+        self._stopped_halves += 1
+        if self._stopped_halves >= self._registered_halves:
+            await self.close()
 
     async def close(self) -> None:
         """Self-initiated close (pipeline ended/cancelled). Fires disconnect

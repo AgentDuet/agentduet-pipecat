@@ -96,11 +96,13 @@ class AgentDuetTransport(BaseTransport):
     def input(self) -> "AgentDuetInputTransport":
         if not self._input:
             self._input = AgentDuetInputTransport(self._session, self._params)
+            self._session.register_half()
         return self._input
 
     def output(self) -> "AgentDuetOutputTransport":
         if not self._output:
             self._output = AgentDuetOutputTransport(self._session, self._params)
+            self._session.register_half()
         return self._output
 
     async def _on_call_error(self, data):
@@ -137,15 +139,25 @@ class AgentDuetInputTransport(BaseInputTransport):
         # Pump before answer: audio_stream() is order-independent and lazily
         # bound, so no first words are dropped while the pipeline wires up.
         self._pump_task = self.create_task(self._pump())
+        # A user-initiated CancelFrame arriving here queues behind this
+        # in-flight answer() (up to its ~60 s ring timeout) since start() must
+        # return before cancel() runs on this same processor. Remote hangup is
+        # unaffected: it aborts answer() itself via CallClosedError.
         await self._session.start()
 
     async def stop(self, frame: EndFrame):
         await super().stop(frame)
-        await self._shutdown()
+        await self._cancel_pump()
+        # Not a close: BaseInputTransport pushes EndFrame downstream *before*
+        # stop() runs, so farewell audio is still traversing the pipeline.
+        # The session self-closes once every registered half has stopped.
+        await self._session.half_stopped()
 
     async def cancel(self, frame: CancelFrame):
         await super().cancel(frame)
-        await self._shutdown()
+        await self._cancel_pump()
+        # Cancel drops everything in flight by design: close immediately.
+        await self._session.close()
 
     async def _pump(self):
         rate = self._session.sample_rate
@@ -155,11 +167,10 @@ class AgentDuetInputTransport(BaseInputTransport):
                 InputAudioRawFrame(audio=chunk, sample_rate=rate, num_channels=1)
             )
 
-    async def _shutdown(self):
+    async def _cancel_pump(self):
         if self._pump_task is not None:
             await self.cancel_task(self._pump_task)
             self._pump_task = None
-        await self._session.close()
 
 
 class AgentDuetOutputTransport(BaseOutputTransport):
@@ -168,6 +179,8 @@ class AgentDuetOutputTransport(BaseOutputTransport):
     def __init__(self, session: _AgentDuetSession, params: TransportParams, **kwargs):
         super().__init__(params, **kwargs)
         self._session = session
+        self._clear_task = None
+        self._logged_closed_drop = False
 
     async def start(self, frame: StartFrame):
         await super().start(frame)
@@ -176,11 +189,24 @@ class AgentDuetOutputTransport(BaseOutputTransport):
 
     async def stop(self, frame: EndFrame):
         await super().stop(frame)
-        await self._session.close()
+        await self._cancel_clear_task()
+        # By the time BaseOutputTransport.stop() returns, MediaSender has
+        # drained its queue and appended end-silence, so half_stopped() (not
+        # an immediate close) is safe here too.
+        await self._session.half_stopped()
 
     async def cancel(self, frame: CancelFrame):
         await super().cancel(frame)
+        await self._cancel_clear_task()
         await self._session.close()
+
+    async def _cancel_clear_task(self):
+        # A barge-in shortly before hangup must not leave this task dangling
+        # past the worker — production workers warn on dangling tasks by
+        # default.
+        if self._clear_task is not None:
+            await self.cancel_task(self._clear_task)
+            self._clear_task = None
 
     async def write_audio_frame(self, frame: OutputAudioRawFrame) -> bool:
         try:
@@ -194,6 +220,9 @@ class AgentDuetOutputTransport(BaseOutputTransport):
         except CallClosedError:
             # Termination races the send loop by design (SDK contract);
             # teardown runs from the hangup event, not from here.
+            if not self._logged_closed_drop:
+                self._logged_closed_drop = True
+                logger.debug("send_audio after call closed; dropping remaining output")
             return False
 
     async def process_frame(self, frame, direction: FrameDirection):
@@ -204,8 +233,10 @@ class AgentDuetOutputTransport(BaseOutputTransport):
             # must not stall the system-frame path. Residual race accepted:
             # an ack landing after the next bot turn begins could flush that
             # turn's audio, but the next turn needs a full STT->LLM->TTS
-            # round trip while the ack needs one network hop.
-            self.create_task(self._clear_remote_buffer())
+            # round trip while the ack needs one network hop. Overwriting a
+            # still-running previous clear task is fine: clear is idempotent
+            # and a newer interruption supersedes the older one.
+            self._clear_task = self.create_task(self._clear_remote_buffer())
 
     async def _clear_remote_buffer(self):
         started = time.monotonic()

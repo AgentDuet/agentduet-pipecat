@@ -2,7 +2,7 @@
 
 import asyncio
 
-from agentduet import Address, CallState, CommandResult, Network
+from agentduet import Address, CallEvent, CallState, CommandResult, Network
 from agentduet.audio_config import CallAudioConfig
 from agentduet.exceptions import CallClosedError
 
@@ -57,6 +57,7 @@ class FakeCall:
         self.clear_calls: int = 0
         self.close_calls: int = 0
         self._hangup_handlers: list = []
+        self._event_handlers: dict = {}
 
     # -- registration ------------------------------------------------------
     def on_hangup(self, func):
@@ -65,6 +66,7 @@ class FakeCall:
 
     def on_call_event(self, event_name):
         def decorator(func):
+            self._event_handlers.setdefault(str(event_name), []).append(func)
             return func
 
         return decorator
@@ -113,6 +115,11 @@ class FakeCall:
         handlers, self._hangup_handlers = self._hangup_handlers, []
         for handler in handlers:
             await handler(None)
+
+    async def trigger_error(self, data) -> None:
+        """Fire whatever handlers were registered for CallEvent.ERROR."""
+        for handler in self._event_handlers.get(str(CallEvent.ERROR), []):
+            await handler(data)
 
     async def _terminate(self) -> None:
         self.state = CallState.TERMINATED
