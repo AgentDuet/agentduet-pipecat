@@ -53,6 +53,7 @@ class FakeCall:
 
         # Recorders
         self.sent_audio: list[bytes] = []
+        self.answer_calls: int = 0
         self.clear_calls: int = 0
         self.close_calls: int = 0
         self._hangup_handlers: list = []
@@ -70,6 +71,7 @@ class FakeCall:
 
     # -- commands ----------------------------------------------------------
     async def answer(self) -> CommandResult:
+        self.answer_calls += 1
         if self.answer_gate is not None:
             await self.answer_gate.wait()
         if self.state == CallState.TERMINATED and not isinstance(

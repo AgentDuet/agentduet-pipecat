@@ -55,6 +55,7 @@ class TestStart:
         await asyncio.gather(first, second)
         # One answer, one connected event — the second start() just waited.
         assert notifier.names().count("on_dialin_connected") == 1
+        assert call.answer_calls == 1
 
     async def test_dead_before_start_fires_dialin_error_and_cancels(self):
         session, call, notifier = make_session()
@@ -167,3 +168,18 @@ class TestTeardown:
             if n == "on_call_state_updated" and p == CallState.TERMINATED
         ]
         assert len(terminated) == 1
+
+    async def test_close_racing_inflight_start_no_error_no_cancel(self):
+        # Pipeline cancel while answer() is in flight: close() wins, and the
+        # aborted start must not report an error or push a worker cancel.
+        session, call, notifier = make_session()
+        call.answer_gate = asyncio.Event()
+        start_task = asyncio.create_task(session.start())
+        await asyncio.sleep(0)  # start() is now awaiting the gate
+        await session.close()   # self-initiated; terminates the call
+        call.answer_gate.set()  # answer() now raises CallClosedError
+        await start_task
+        names = notifier.names()
+        assert "on_dialin_error" not in names
+        assert "on_dialin_connected" not in names
+        assert notifier.cancel_reasons == []

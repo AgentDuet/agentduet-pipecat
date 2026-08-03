@@ -103,6 +103,8 @@ class _AgentDuetSession:
             if self._torn_down or self._call.state == CallState.TERMINATED:
                 # A hangup raced the truthy answer; teardown ran (or will run)
                 # from on_hangup. Connected events must never fire.
+                # Deliberate silence (spec matrix row 4): no connected, no error —
+                # the hangup path owns all signaling for this call.
                 return
             self._connected_fired = True
             await self._notifier._fire("on_dialin_connected", self._payload())
@@ -111,8 +113,14 @@ class _AgentDuetSession:
             self._start_complete.set()
 
     async def _fail_start(self, result: CommandResult) -> None:
+        if self._self_initiated:
+            # close() raced an in-flight answer(): close()'s own _teardown
+            # (in its finally) owns all signaling here. Reporting an error or
+            # requesting a cancel for our own deliberate close is spurious.
+            return
         already_torn_down = self._torn_down
         self._torn_down = True
+        logger.debug("call %s answer failed: %s", self._call.id, result.error_code)
         await self._notifier._fire("on_dialin_error", result)
         if not already_torn_down:
             await self._fire_state()
@@ -150,6 +158,12 @@ class _AgentDuetSession:
         if self._torn_down:
             return
         self._torn_down = True
+        logger.debug(
+            "call %s teardown (self_initiated=%s, connected=%s)",
+            self._call.id,
+            self._self_initiated,
+            self._connected_fired,
+        )
         if self._connected_fired:
             payload = self._payload()
             # Awaited: the app's last chance to flush/log before disconnect.
