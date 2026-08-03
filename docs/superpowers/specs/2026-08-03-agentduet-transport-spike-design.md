@@ -24,10 +24,13 @@ API. That inventory is done; these findings supersede the parent spec's sketches
   stage: `VADProcessor(vad_analyzer=SileroVADAnalyzer())`. `TransportParams`
   has no VAD fields.
 - **VAD alone never triggers interruption.** `VADProcessor` emits
-  `VADUserStartedSpeakingFrame`; only a `UserTurnProcessor` (with
-  `enable_interruptions`) converts user speech into
-  `broadcast_interruption()` → `InterruptionFrame` both directions. Any
-  pipeline that wants barge-in must include it.
+  `VADUserStartedSpeakingFrame`; only a `UserTurnProcessor` converts user
+  speech into `broadcast_interruption()` → `InterruptionFrame` both
+  directions. Any pipeline that wants barge-in must include it. (Interruption
+  enablement is a kwarg of the user-turn *start strategy*,
+  `enable_interruptions=True` by default — not a `UserTurnProcessor`
+  constructor parameter — so a bare `UserTurnProcessor()` already gives
+  barge-in.)
 - **Worker shutdown from a transport** is `CancelWorkerFrame` (hard) or
   `EndWorkerFrame` (graceful) pushed from either transport half; the worker
   source/sink convert it to `CancelFrame`/`EndFrame` through the pipeline.
@@ -148,17 +151,21 @@ The invariants, then the rows the tests pin one by one:
 
 - Connected events fire **at most once**, only after a truthy `answer()`, and
   **never after** disconnect events.
-- Disconnect events fire **exactly once** per call that got a hangup, from
-  `_teardown()` only.
+- Disconnect events fire **at most once**, from `_teardown()` only, and only
+  for calls whose connected events fired (the connected/disconnected pair is
+  an alias layer; a call that never connected reports through
+  `on_dialin_error` instead, never through a disconnect without a connect).
 - `on_before_disconnect` completes before disconnect events fire.
-- Worker cancel is pushed only for **remote** hangups.
+- Worker cancel is pushed whenever teardown was **not** self-initiated
+  (`_self_initiated` unset) — that covers remote hangups and every failed or
+  dead answer path; a teardown triggered by our own `close()` never pushes it.
 - `TERMINATED` is sticky; every path treats it as terminal.
 
 | Termination arrives | Behaviour |
 |---|---|
-| Before `start()` (call already `TERMINATED`) | skip `answer()`; fire `on_dialin_error` with synthesized `CommandResult(success=False, error_code="CALL_TERMINATED")`; push `CancelWorkerFrame`; connected events never fire |
-| Mid-`answer()` | `answer()` raises `CallClosedError` → caught, routed into the same disconnect path |
-| `answer()` returns falsy | fire `on_dialin_error` with the real `CommandResult`; push `CancelWorkerFrame` |
+| Before `start()` (call already `TERMINATED`) | skip `answer()`; fire `on_dialin_error` with synthesized `CommandResult(success=False, error_code="CALL_TERMINATED")`; push `CancelWorkerFrame`; connected/disconnect events never fire |
+| Mid-`answer()` | `answer()` raises `CallClosedError` → caught; fire `on_dialin_error` with the same synthesized `CALL_TERMINATED` result; push `CancelWorkerFrame`; connected/disconnect events never fire (the SDK's `on_hangup` still fires, but `_teardown()` sees connected-never-fired and skips disconnect events) |
+| `answer()` returns falsy | fire `on_dialin_error` with the real `CommandResult`; push `CancelWorkerFrame`; connected/disconnect events never fire |
 | `answer()` truthy but teardown latch already set (hangup raced the answer) | suppress connected events; disconnect path has already run or will run from the hangup event |
 | Answered, remote hangup | `on_hangup` → `_teardown()`: `on_before_disconnect` → disconnect events → cancel pump → push `CancelWorkerFrame` |
 | Pipeline ends/cancels first | output `stop()`/`cancel()` → `session.close()` (sets `_self_initiated`) → `call.close()` → resulting hangup runs `_teardown()`: events fire once, **no** worker cancel |
@@ -188,9 +195,12 @@ Raw-SDK arrival per parent spec §4.2 (`SessionManager` + `@sm.on_incoming_call`
 → `open_session` → `process_call` → transport), then:
 
 ```
-input() → VADProcessor(SileroVADAnalyzer) → UserTurnProcessor(enable_interruptions)
+input() → VADProcessor(SileroVADAnalyzer) → UserTurnProcessor()
         → ToneBot → output()
 ```
+
+(`UserTurnProcessor()` bare: interruptions default to enabled via the start
+strategy, see §1.)
 
 `ToneBot` (~30 lines): on user-turn-stopped, streams N seconds of generated
 sine tone as `OutputAudioRawFrame`s. Barge-in is audible (tone stops when the
