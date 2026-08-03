@@ -1,0 +1,240 @@
+# AgentDuetTransport Spike — Design
+
+| | |
+|---|---|
+| Status | Approved design, pending implementation plan |
+| Date | 2026-08-03 |
+| Scope | Milestone 1 (spike) of [specs/pipecat-transport-spec.md](../../../specs/pipecat-transport-spec.md): inbound-only transport, keyless example bot, live validation, barge-in measurement. Outbound dialing is a later round. |
+| Verified against | `pipecat-ai` 1.7.0 (installed and inventoried), `agentduet` 1.0.0b10 (local checkout at `~/Documents/wss-sdk-python`) |
+
+## 1. Context and resolved unknowns
+
+The parent spec (Draft v3) defers to a spike the inventory of Pipecat's current
+API. That inventory is done; these findings supersede the parent spec's sketches:
+
+- **`PipelineWorker` / `WorkerRunner` are current.** `PipelineParams` lives in
+  `pipecat.pipeline.worker`. `PipelineRunner` survives only as a `WorkerRunner`
+  subclass; `pipeline/task.py` defines no classes.
+- **`StartInterruptionFrame` no longer exists.** The system frame is
+  `InterruptionFrame`. The clear-buffer hook is intercepting it in the output
+  transport's `process_frame` — the Twilio serializer's pattern
+  (`serializers/twilio.py`), not Daily's (Daily has no server-side buffer to
+  clear and implements nothing here).
+- **VAD is no longer inside the input transport.** In 1.7 it is a pipeline
+  stage: `VADProcessor(vad_analyzer=SileroVADAnalyzer())`. `TransportParams`
+  has no VAD fields.
+- **VAD alone never triggers interruption.** `VADProcessor` emits
+  `VADUserStartedSpeakingFrame`; only a `UserTurnProcessor` (with
+  `enable_interruptions`) converts user speech into
+  `broadcast_interruption()` → `InterruptionFrame` both directions. Any
+  pipeline that wants barge-in must include it.
+- **Worker shutdown from a transport** is `CancelWorkerFrame` (hard) or
+  `EndWorkerFrame` (graceful) pushed from either transport half; the worker
+  source/sink convert it to `CancelFrame`/`EndFrame` through the pipeline.
+- **Transport contract:** subclass `BaseInputTransport` / `BaseOutputTransport`;
+  override `start`/`stop`/`cancel`; call `await set_transport_ready(frame)` when
+  media may flow; input pushes via `push_audio_frame`; output overrides
+  `write_audio_frame(frame) -> bool`; events via `_register_event_handler` /
+  `_call_event_handler` on the `BaseTransport`.
+
+Two SDK facts the parent spec did not cover:
+
+- **`Call` has no public inbound/outbound discriminator** (`_origin` is
+  private). The transport derives the remote party from public surface instead:
+  the party whose `value != call.subscriber`. Track ids are role-fixed locally
+  (caller=0, callee=1), so this yields the parent spec's §3 rule without an SDK
+  change.
+- **`VoiceAgent._bridge` reads `call.caller.audio_stream()` on the outbound
+  path too**, where caller is the subscriber (the agent's own leg). Suspected
+  latent SDK bug; it is *not* fixed here. The spike's live outbound probe
+  (§8) settles empirically which track carries the callee; the finding gets
+  reported to the SDK repo separately.
+
+## 2. Deliverables and layout
+
+Package `pipecat-agentduet`, import `pipecat_agentduet`, in this repo.
+Dependencies: `agentduet>=1.0.0b10,<2`, `pipecat-ai>=1.7,<2`. Tooling mirrors
+the SDK repo: uv, ruff, pytest + pytest-asyncio + pytest-timeout.
+
+```
+pyproject.toml
+src/pipecat_agentduet/__init__.py     exports AgentDuetTransport
+src/pipecat_agentduet/transport.py    AgentDuetTransport + input/output halves
+src/pipecat_agentduet/_session.py     _AgentDuetSession — lifecycle, teardown, events
+tests/fakes.py                        FakeCall
+tests/test_session.py                 teardown matrix, event invariants
+tests/test_transport.py               frame plumbing, sample-rate guard
+examples/inbound_tone_bot.py          keyless spike bot
+```
+
+One `transport.py` per Pipecat house style; split only past ~300 lines.
+`_session.py` is separate because it carries all the lifecycle risk and must be
+testable with no frames in play.
+
+## 3. Components
+
+### `_AgentDuetSession` (private)
+
+Wraps the attached-not-answered `Call`. Owns answer, hangup wiring, the
+teardown latch, and event fan-out. Input and output transports share one
+instance (the `WebsocketClientSession` pattern).
+
+- `remote_party` → `call.callee if call.caller.value == call.subscriber else call.caller`.
+- `sample_rate` → `call.audio_config.sample_rate`.
+- `start()` — latched (idempotent; both halves call it). Registers `on_hangup`
+  **before** `answer()` so a hangup mid-answer cannot slip between. Fires
+  connected events only on truthy `answer()` and only if the teardown latch is
+  unset.
+- `close()` — sets `_self_initiated`, then `call.close()` (itself idempotent).
+- `_teardown()` — single idempotent choke point for every disconnect path,
+  mirroring the SDK's `_mark_terminated`. Order within it: await
+  `on_before_disconnect` → fire disconnect events → push `CancelWorkerFrame`
+  (only if not `_self_initiated`).
+
+### `AgentDuetTransport(BaseTransport)`
+
+```python
+AgentDuetTransport(call, params: TransportParams | None = None)
+```
+
+- `params` defaults to audio in+out enabled.
+- Constructor **raises** if user-set `audio_in_sample_rate` /
+  `audio_out_sample_rate` conflict with `call.audio_config.sample_rate` — the
+  parent spec's "no second place to type a rate" rule, enforced. A conflicting
+  rate arriving via `StartFrame` (from `PipelineParams`) logs a warning and the
+  call's rate wins (raising mid-pipeline helps no one).
+- Exposes `transport.call` for SDK capabilities.
+- Owns the event registry (`_register_event_handler`); a single
+  `_fire(native_name, payload)` helper also invokes the generic twin, making
+  the alias rule ("one signal, two names, one moment, identical payload")
+  structural rather than conventional.
+
+### Input transport (`BaseInputTransport`)
+
+- `start()`: set both sample rates from the call, start the `audio_stream()`
+  pump task, **then** `await session.start()` (answer), then
+  `set_transport_ready`. Starting the pump before answer is safe —
+  `audio_stream()` is documented order-independent and lazily bound — and
+  closes the first-words gap more tightly than answering first.
+- Pump: `async for chunk in session.remote_party.audio_stream():` →
+  `push_audio_frame(InputAudioRawFrame(chunk, rate, 1))`. The stream ends
+  cleanly on termination (StopAsyncIteration), so the pump task just exits.
+- `stop`/`cancel`: cancel pump, `session.close()`.
+
+### Output transport (`BaseOutputTransport`)
+
+- `start()`: `await session.start()` (latched no-op if input won), then
+  `set_transport_ready`.
+- `write_audio_frame(frame)`: `await call.send_audio(frame.audio)` — bytes
+  untouched (both sides mono s16 PCM at the same rate).
+  - `BufferFullError` → drop chunk, warn, return False. Back-pressure, not
+    teardown (default ring buffer ≈ 32 s at 16 kHz; drops indicate a stall).
+  - `CallClosedError` → return False silently; termination racing the send
+    loop is documented SDK behaviour, and `_teardown()` runs from the hangup
+    event, not from here.
+- `process_frame`: on `InterruptionFrame`, **spawn**
+  `call.clear_send_audio_buffer()` as a task (plus `super()`'s handling). Not
+  awaited inline: the local ring-buffer flush inside it is instant, but it then
+  awaits the `agent.interrupt` server ack with a 10 s timeout, which would
+  stall the system-frame path exactly when latency matters. Documented residual
+  race: an ack landing after the *next* bot turn starts could flush that
+  turn's audio; the next turn needs a full STT→LLM→TTS round trip while the
+  ack needs one network hop, so this is accepted and noted in code.
+- `stop`/`cancel`: `session.close()`.
+
+## 4. Teardown matrix
+
+The invariants, then the rows the tests pin one by one:
+
+- Connected events fire **at most once**, only after a truthy `answer()`, and
+  **never after** disconnect events.
+- Disconnect events fire **exactly once** per call that got a hangup, from
+  `_teardown()` only.
+- `on_before_disconnect` completes before disconnect events fire.
+- Worker cancel is pushed only for **remote** hangups.
+- `TERMINATED` is sticky; every path treats it as terminal.
+
+| Termination arrives | Behaviour |
+|---|---|
+| Before `start()` (call already `TERMINATED`) | skip `answer()`; fire `on_dialin_error` with synthesized `CommandResult(success=False, error_code="CALL_TERMINATED")`; push `CancelWorkerFrame`; connected events never fire |
+| Mid-`answer()` | `answer()` raises `CallClosedError` → caught, routed into the same disconnect path |
+| `answer()` returns falsy | fire `on_dialin_error` with the real `CommandResult`; push `CancelWorkerFrame` |
+| `answer()` truthy but teardown latch already set (hangup raced the answer) | suppress connected events; disconnect path has already run or will run from the hangup event |
+| Answered, remote hangup | `on_hangup` → `_teardown()`: `on_before_disconnect` → disconnect events → cancel pump → push `CancelWorkerFrame` |
+| Pipeline ends/cancels first | output `stop()`/`cancel()` → `session.close()` (sets `_self_initiated`) → `call.close()` → resulting hangup runs `_teardown()`: events fire once, **no** worker cancel |
+
+## 5. Event surface (spike subset)
+
+All v1 event names from the parent spec §6 are registered (quickstart bots bind
+without error); only inbound paths fire this round. Handler signature:
+`async def handler(transport, payload)`.
+
+| Event | Fires | Payload |
+|---|---|---|
+| `on_client_connected` / `on_dialin_connected` | truthy `answer()`, gated on teardown latch | frozen dataclass: `participant: Address`, `call_id: str`, `state: CallState` |
+| `on_client_disconnected` / `on_dialin_stopped` | exactly once, from `_teardown()` | same shape |
+| `on_dialin_error` | falsy/raising `answer()`, or dead-before-start | `CommandResult` |
+| `on_error` | `CallEvent.ERROR` | SDK error payload |
+| `on_call_state_updated` | each transition the session drives or observes | `CallState` |
+| `on_before_disconnect` | first step of `_teardown()`, awaited | same shape as connected |
+| `on_dialout_*` | registered; never fire until the outbound round | — |
+
+Generic and native names fire in one code path with one payload object
+(structural alias, §3). Payloads reuse SDK types; no parallel type system.
+
+## 6. Example: `examples/inbound_tone_bot.py`
+
+Raw-SDK arrival per parent spec §4.2 (`SessionManager` + `@sm.on_incoming_call`
+→ `open_session` → `process_call` → transport), then:
+
+```
+input() → VADProcessor(SileroVADAnalyzer) → UserTurnProcessor(enable_interruptions)
+        → ToneBot → output()
+```
+
+`ToneBot` (~30 lines): on user-turn-stopped, streams N seconds of generated
+sine tone as `OutputAudioRawFrame`s. Barge-in is audible (tone stops when the
+caller speaks) and measurable: log the timestamp of `InterruptionFrame`
+reaching the output transport and the `bytes_cleared` payload returned by
+`clear_send_audio_buffer` — the two numbers the parent spec wants for the
+docs. Connected/disconnected handlers log, proving the generic aliases fire.
+
+Constraint: the spike connector runs at 16 kHz (the default) — Silero VAD
+supports only 8 k/16 k. A 24 k connector needs an input resample stage; that is
+a docs note, not spike scope.
+
+## 7. Tests
+
+`FakeCall` fakes only the public `Call` surface the transport touches:
+scriptable `answer()` result/latency, manual `trigger_hangup()`, recorded
+`send_audio` / `clear_send_audio_buffer` / `close` calls, `asyncio.Queue`-backed
+party streams.
+
+- `test_session.py`: every teardown-matrix row; every invariant in §4.
+- `test_transport.py`: inbound bytes → `InputAudioRawFrame` tagged with the
+  call's rate; `write_audio_frame` → `send_audio` byte-identical;
+  `InterruptionFrame` → `clear_send_audio_buffer` called without blocking the
+  frame path (asserted via a deliberately slow fake); `BufferFullError` →
+  chunk dropped, pipeline alive; conflicting constructor rate → raises;
+  remote-party selection on both call shapes (subscriber-as-caller and
+  subscriber-as-callee).
+
+## 8. Live validation (manual spike exit criteria)
+
+Real inbound call to the 16 kHz connector, no third-party keys:
+
+1. Call in → hear tone after speaking; speak over it → tone stops (barge-in);
+   record the measured cutoff numbers.
+2. Hang up mid-tone → clean pipeline teardown, disconnect events once.
+3. Hang up while ringing (before/during answer) → clean teardown, no connected
+   events.
+4. One `session.make_call` + `dial()` probe, observing which track carries the
+   callee's audio on outbound — settles the `VoiceAgent` discrepancy with
+   data before the outbound round is designed.
+
+## 9. Out of scope this round
+
+Outbound dialing (`dial()`, dial-out events firing), whisper/barge/spy,
+messaging, DTMF, recording/transcription, `bot(runner_args)` conformance,
+publishing to PyPI. All per parent spec; none are unblocked by this spike
+except outbound, which the §8 probe de-risks.
