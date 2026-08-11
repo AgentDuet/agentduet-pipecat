@@ -343,12 +343,22 @@ Findings:
 
 Caller hung up during ring: no connected or disconnected events fired
 (alias-pair rule held), `CancelWorkerFrame(reason: answer failed)` tore the
-pipeline down cleanly, and the process kept serving. **Observation:** the
-failure surfaced as the `call.answer` command's client-side 10 s response
-timeout — the server sent neither a `call.terminated` event nor an answer
-response for the abandoned call — so an abandoned ringing call keeps a dead
-pipeline alive for ~10 s before cleanup. Candidate addition to the parent
-spec's §10 protocol-gap list: an "abandoned before answer" signal.
+pipeline down cleanly, and the process kept serving.
+
+**Protocol gap, confirmed with server-side logs:** when the caller abandons
+a ringing call, the server neither notifies the attached client nor fails
+the pending `call.answer` — the command simply never gets a response. The
+client escapes only via its own 10 s command timeout, so an abandoned
+ringing call keeps a dead pipeline alive for ~10 s. The `call.terminated`
+that does appear server-side (09:05:48.614, 222 ms *after* the client
+timeout fired) was triggered by the SDK's own teardown closing the media
+connection — a consequence of client cleanup, not a signal. Candidate
+addition to the parent spec's §10 protocol-gap list: **fail a pending
+`call.answer` promptly (e.g. `success=false, CALL_ALREADY_TERMINATED`)
+and/or emit `call.terminated` when a ringing call is abandoned.** The
+transport needs no change; it already handles the timeout path correctly
+and will handle a prompt failure or terminated event identically but
+faster.
 
 ### Still open
 
