@@ -284,3 +284,64 @@ Outbound dialing (`dial()`, dial-out events firing), whisper/barge/spy,
 messaging, DTMF, recording/transcription, `bot(runner_args)` conformance,
 publishing to PyPI. All per parent spec; none are unblocked by this spike
 except outbound, which the §8 probe de-risks.
+
+## Spike results (live validation, 2026-08-11)
+
+Setup: 16 kHz connector, TELCO caller (+8497…), keyless pipeline
+(`input → VADProcessor(Silero) → UserTurnProcessor(speech-timeout stop) →
+ToneBot(5 s) → output`), Pipecat 1.7.0, agentduet 1.0.0b10.
+
+### Barge-in (spec §8 measurement)
+
+Five mid-tone interruptions; `clear_send_audio_buffer()` payload = bytes
+flushed from the **client** ring buffer, ack = full `agent.interrupt`
+round trip from the output transport:
+
+| tone played | cleared (client) | implied server prefetch | ack |
+|---|---|---|---|
+| 3.22 s | 34 560 B (1.08 s) | 0.70 s | 53 ms |
+| 1.87 s | 71 680 B (2.24 s) | 0.89 s | 60 ms |
+| 2.07 s | 65 280 B (2.04 s) | 0.89 s | 72 ms |
+| 3.25 s | 29 440 B (0.92 s) | 0.83 s | 64 ms |
+
+Findings:
+
+- **Ack round trip: 50–72 ms** across all interruptions (n=9, including
+  empty-buffer ones). The clear is spawned, so none of this sits on the
+  frame path.
+- **Server flow control prefetches a consistent ~0.7–0.9 s** ahead of
+  playout (expected-remaining minus client-cleared, stable across runs).
+  That prefetched audio is precisely what the *server-side* flush kills;
+  a client-only clear would leave ~0.9 s of stale audio playing after
+  every barge-in. Confirms the spec §8 claim that
+  `clear_send_audio_buffer()` must and does flush both sides.
+- **Estimated speech-onset → audible-stop cutoff: ≈ 250–350 ms**,
+  dominated by VAD detection (`start_secs=0.2`), plus one server hop
+  (~25–35 ms one-way) and carrier playout residue. Caller-reported
+  behavior matched the turn-taking design.
+
+### Lifecycle
+
+- Connected/disconnected alias events fired exactly once per call with
+  correct payloads; remote hangup → `CancelWorkerFrame(reason: remote
+  hangup)` → clean worker teardown; process served multiple sequential
+  calls on fresh transports; SIGINT disconnected cleanly.
+- "Few hundred lines" estimate: confirmed — 461 lines in
+  `src/pipecat_agentduet/`.
+
+### Lessons for the v1 examples/docs
+
+- **Pipecat's default user-turn stop strategy (Smart Turn v3) judges
+  test phrases as incomplete turns** and stalls the bot's reply by
+  5–15 s (until the stop-timeout, `strategy: None`). Keyless demos must
+  pin `SpeechTimeoutUserTurnStopStrategy(wait_for_transcript=False)`;
+  real STT pipelines can keep the default. Worth a docs callout.
+- Interruptions with an empty buffer (user speaks during bot silence)
+  are normal and log `cleared 0` — harmless.
+
+### Still open
+
+- Hangup-while-ringing (matrix row 1/2 live) and the ring-buffer
+  drain-on-close question (§3 open item) — not yet observed live.
+- Outbound track probe (§8 item 4) — not yet run; the VoiceAgent
+  caller/callee question remains open.
