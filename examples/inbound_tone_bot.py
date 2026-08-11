@@ -38,7 +38,9 @@ from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.worker import PipelineWorker
 from pipecat.processors.audio.vad_processor import VADProcessor
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
+from pipecat.turns.user_stop import SpeechTimeoutUserTurnStopStrategy
 from pipecat.turns.user_turn_processor import UserTurnProcessor
+from pipecat.turns.user_turn_strategies import UserTurnStrategies
 from pipecat.workers.runner import WorkerRunner
 
 from pipecat_agentduet import AgentDuetTransport
@@ -114,7 +116,18 @@ async def run_call(sm: SessionManager, noti: IncomingCallNotification):
         [
             transport.input(),
             VADProcessor(vad_analyzer=SileroVADAnalyzer()),
-            UserTurnProcessor(),  # bare: interruptions default to enabled
+            # Plain VAD-timeout turn stop. The default stop strategy is the
+            # Smart Turn v3 semantic model, which (correctly) judges test
+            # phrases as incomplete turns and stalls the tone by 5-15 s until
+            # the stop-timeout fires — observed on live validation 2026-08-11.
+            # wait_for_transcript=False because this keyless pipeline has no
+            # STT to produce one. Interruptions stay enabled (start-strategy
+            # default).
+            UserTurnProcessor(
+                user_turn_strategies=UserTurnStrategies(
+                    stop=[SpeechTimeoutUserTurnStopStrategy(wait_for_transcript=False)]
+                )
+            ),
             ToneBot(),
             transport.output(),
         ]
