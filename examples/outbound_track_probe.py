@@ -2,11 +2,10 @@
 the remote party's audio. Settles the VoiceAgent caller/callee discrepancy
 with data before the outbound transport round is designed.
 
-Env (read from the environment or a .env file in the repo root):
+Env (from the shell or examples/.env — see examples/.env.example):
 AGENTDUET_API_KEY, AGENTDUET_CONNECTOR_UUID, optional AGENTDUET_BASE_URL,
 PROBE_SUBSCRIBER (the line to call from), PROBE_DEST (E.164 number to call).
-Run:  PROBE_SUBSCRIBER=+65… PROBE_DEST=+65… \
-          uv run --group example python examples/outbound_track_probe.py
+Run:  uv run --group example python examples/outbound_track_probe.py
 Answer the phone and speak; the probe logs bytes per track for 10 s.
 """
 
