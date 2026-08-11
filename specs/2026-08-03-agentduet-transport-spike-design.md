@@ -339,9 +339,20 @@ Findings:
 - Interruptions with an empty buffer (user speaks during bot silence)
   are normal and log `cleared 0` — harmless.
 
+### Hangup while ringing (matrix rows 2/3, live)
+
+Caller hung up during ring: no connected or disconnected events fired
+(alias-pair rule held), `CancelWorkerFrame(reason: answer failed)` tore the
+pipeline down cleanly, and the process kept serving. **Observation:** the
+failure surfaced as the `call.answer` command's client-side 10 s response
+timeout — the server sent neither a `call.terminated` event nor an answer
+response for the abandoned call — so an abandoned ringing call keeps a dead
+pipeline alive for ~10 s before cleanup. Candidate addition to the parent
+spec's §10 protocol-gap list: an "abandoned before answer" signal.
+
 ### Still open
 
-- Hangup-while-ringing (matrix row 1/2 live) and the ring-buffer
-  drain-on-close question (§3 open item) — not yet observed live.
+- Ring-buffer drain-on-close (§3 open item): does a farewell fully play
+  out when the bot ends the call? Not yet checked by ear.
 - Outbound track probe (§8 item 4) — not yet run; the VoiceAgent
   caller/callee question remains open.
