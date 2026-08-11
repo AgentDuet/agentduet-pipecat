@@ -358,9 +358,34 @@ this window occupies a pipeline for ~10 s before the timeout reclaims it.
 The transport needs no change and would handle an earlier signal, if one
 ever exists, identically but faster.
 
+### Outbound track probe (§8 item 4) — RESOLVED
+
+`examples/outbound_track_probe.py`, 2026-08-11: subscriber `+6590114731`
+dialled `+84972840068`; `caller == subscriber`, `callee == ` the dialled
+number. Bytes received over a 10 s window with the remote party speaking:
+
+| track | bytes | audio |
+|---|---|---|
+| `callee` (track 1) | 317 440 | 9.92 s — continuous |
+| `caller` (track 0) | **0** | nothing at all |
+
+Conclusions:
+
+1. **The parent spec §3 rule is correct**: on an outbound call the remote
+   party's audio is on `call.callee`. The transport's subscriber-derived
+   rule (`remote_party` = the party whose `value != call.subscriber`)
+   selects `callee` here, so it is right in both directions with no need
+   for a public `origin` accessor.
+2. **`VoiceAgent._bridge` has a confirmed outbound bug.** It reads
+   `call.caller.audio_stream()` on every path
+   (`voice_agent.py:334`, reached from `_place_outbound`), which on an
+   outbound call is the agent's own leg — track 0, empirically 0 bytes.
+   The model therefore never hears the callee: outbound VoiceAgent calls
+   are deaf (agent→callee audio still works). Fix belongs in the SDK
+   repo, not here — read the non-subscriber party, exactly as this
+   transport does.
+
 ### Still open
 
 - Ring-buffer drain-on-close (§3 open item): does a farewell fully play
-  out when the bot ends the call? Not yet checked by ear.
-- Outbound track probe (§8 item 4) — not yet run; the VoiceAgent
-  caller/callee question remains open.
+  out when the bot ends the call? Not yet checked by ear. Deferred to v1.
