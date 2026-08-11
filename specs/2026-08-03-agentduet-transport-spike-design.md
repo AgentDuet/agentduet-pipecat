@@ -103,9 +103,13 @@ AgentDuetTransport(call, params: TransportParams | None = None)
 - `params` defaults to audio in+out enabled.
 - Constructor **raises** if user-set `audio_in_sample_rate` /
   `audio_out_sample_rate` conflict with `call.audio_config.sample_rate` — the
-  parent spec's "no second place to type a rate" rule, enforced. A conflicting
-  rate arriving via `StartFrame` (from `PipelineParams`) logs a warning and the
-  call's rate wins (raising mid-pipeline helps no one).
+  parent spec's "no second place to type a rate" rule, enforced. A
+  `StartFrame` rate is ignored without a warning — the call's rate always
+  wins because the constructor writes it into `TransportParams`. (No warning
+  by design: `StartFrame.audio_out_sample_rate` defaults to 24000, so warning
+  on mismatch would fire spuriously on every default-config run, and
+  differing pipeline rates are legitimate — Pipecat resamples at the
+  transport seam.)
 - Exposes `transport.call` for SDK capabilities.
 - Owns the event registry (`_register_event_handler`); a single
   `_fire(native_name, payload)` helper also invokes the generic twin, making
@@ -114,15 +118,25 @@ AgentDuetTransport(call, params: TransportParams | None = None)
 
 ### Input transport (`BaseInputTransport`)
 
-- `start()`: set both sample rates from the call, start the `audio_stream()`
-  pump task, **then** `await session.start()` (answer), then
-  `set_transport_ready`. Starting the pump before answer is safe —
-  `audio_stream()` is documented order-independent and lazily bound — and
-  closes the first-words gap more tightly than answering first.
+- `start()`: `set_transport_ready` first (the input audio queue exists only
+  after it, and audio can arrive the instant `answer()` succeeds server-side),
+  then start the `audio_stream()` pump task, **then** `await session.start()`
+  (answer). Starting the pump before answer is safe — `audio_stream()` is
+  documented order-independent and lazily bound — and closes the first-words
+  gap more tightly than answering first.
 - Pump: `async for chunk in session.remote_party.audio_stream():` →
   `push_audio_frame(InputAudioRawFrame(chunk, rate, 1))`. The stream ends
   cleanly on termination (StopAsyncIteration), so the pump task just exits.
-- `stop`/`cancel`: cancel pump, `session.close()`.
+- `stop` (EndFrame): cancel pump, then `session.half_stopped()` — **not** an
+  immediate close. `BaseInputTransport` pushes EndFrame downstream *before*
+  calling `stop()`, so at that moment the farewell audio is still traversing
+  STT→LLM→TTS→output; closing the call here would drop it deterministically.
+  The session closes when the **last registered half** reports stopped
+  (Daily's `_leave_counter` pattern), which honors the parent spec's rule
+  "pipeline end reaching the *output* transport ⇒ `call.close()`" while
+  keeping input-only pipelines working (one registered half).
+- `cancel` (CancelFrame): cancel pump, `session.close()` immediately — cancel
+  means drop everything in flight.
 
 ### Output transport (`BaseOutputTransport`)
 
@@ -143,7 +157,28 @@ AgentDuetTransport(call, params: TransportParams | None = None)
   race: an ack landing after the *next* bot turn starts could flush that
   turn's audio; the next turn needs a full STT→LLM→TTS round trip while the
   ack needs one network hop, so this is accepted and noted in code.
-- `stop`/`cancel`: `session.close()`.
+- `stop` (EndFrame): `session.half_stopped()` — by the time
+  `BaseOutputTransport.stop()` returns, `MediaSender` has drained its queue
+  and appended end-silence, so audio already handed to the SDK is all that
+  remains in flight. `cancel` (CancelFrame): `session.close()` immediately.
+- Interruption clear tasks are tracked and cancelled in `stop`/`cancel` so a
+  barge-in shortly before hangup can't leave a task dangling past the worker
+  (production workers warn on dangling tasks by default).
+
+### Session half-latch
+
+`_AgentDuetSession` gains `register_half()` (called once per constructed
+transport half) and `half_stopped()` (EndFrame path). When every registered
+half has reported stopped, the session runs `close()`. `close()` itself stays
+public and immediate for the cancel path. Idempotence rules are unchanged —
+`_teardown()` remains the single choke point.
+
+**Open item for live validation (§8):** even with output-side close, audio
+already handed to the SDK sits in its client ring buffer (~32 s capacity,
+written faster than real time); `call.close()` drops that buffer locally.
+Whether a farewell fully plays out depends on how fast the server pull drains
+it — measure on a live call; if it truncates, the SDK may need a
+drain-before-close, which is an SDK feature request, not transport code.
 
 ## 4. Teardown matrix
 
@@ -168,7 +203,8 @@ The invariants, then the rows the tests pin one by one:
 | `answer()` returns falsy | fire `on_dialin_error` with the real `CommandResult`; push `CancelWorkerFrame`; connected/disconnect events never fire |
 | `answer()` truthy but teardown latch already set (hangup raced the answer) | suppress connected events; disconnect path has already run or will run from the hangup event |
 | Answered, remote hangup | `on_hangup` → `_teardown()`: `on_before_disconnect` → disconnect events → cancel pump → push `CancelWorkerFrame` |
-| Pipeline ends/cancels first | output `stop()`/`cancel()` → `session.close()` (sets `_self_initiated`) → `call.close()` → resulting hangup runs `_teardown()`: events fire once, **no** worker cancel |
+| Pipeline **ends** first (EndFrame) | each half reports `half_stopped()` as EndFrame reaches it; when the last registered half stops, the session runs `close()` (sets `_self_initiated`) → `call.close()` → `_teardown()`: events fire once, **no** worker cancel. Audio in flight between input and output is preserved. |
+| Pipeline **cancelled** first (CancelFrame) | first half to see it calls `session.close()` immediately (sets `_self_initiated`); same event behaviour, everything in flight is dropped by design |
 
 ## 5. Event surface (spike subset)
 
@@ -248,3 +284,108 @@ Outbound dialing (`dial()`, dial-out events firing), whisper/barge/spy,
 messaging, DTMF, recording/transcription, `bot(runner_args)` conformance,
 publishing to PyPI. All per parent spec; none are unblocked by this spike
 except outbound, which the §8 probe de-risks.
+
+## Spike results (live validation, 2026-08-11)
+
+Setup: 16 kHz connector, TELCO caller (+8497…), keyless pipeline
+(`input → VADProcessor(Silero) → UserTurnProcessor(speech-timeout stop) →
+ToneBot(5 s) → output`), Pipecat 1.7.0, agentduet 1.0.0b10.
+
+### Barge-in (spec §8 measurement)
+
+Five mid-tone interruptions; `clear_send_audio_buffer()` payload = bytes
+flushed from the **client** ring buffer, ack = full `agent.interrupt`
+round trip from the output transport:
+
+| tone played | cleared (client) | implied server prefetch | ack |
+|---|---|---|---|
+| 3.22 s | 34 560 B (1.08 s) | 0.70 s | 53 ms |
+| 1.87 s | 71 680 B (2.24 s) | 0.89 s | 60 ms |
+| 2.07 s | 65 280 B (2.04 s) | 0.89 s | 72 ms |
+| 3.25 s | 29 440 B (0.92 s) | 0.83 s | 64 ms |
+
+Findings:
+
+- **Ack round trip: 50–72 ms** across all interruptions (n=9, including
+  empty-buffer ones). The clear is spawned, so none of this sits on the
+  frame path.
+- **Server flow control prefetches a consistent ~0.7–0.9 s** ahead of
+  playout (expected-remaining minus client-cleared, stable across runs).
+  That prefetched audio is precisely what the *server-side* flush kills;
+  a client-only clear would leave ~0.9 s of stale audio playing after
+  every barge-in. Confirms the spec §8 claim that
+  `clear_send_audio_buffer()` must and does flush both sides.
+- **Estimated speech-onset → audible-stop cutoff: ≈ 250–350 ms**,
+  dominated by VAD detection (`start_secs=0.2`), plus one server hop
+  (~25–35 ms one-way) and carrier playout residue. Caller-reported
+  behavior matched the turn-taking design.
+
+### Lifecycle
+
+- Connected/disconnected alias events fired exactly once per call with
+  correct payloads; remote hangup → `CancelWorkerFrame(reason: remote
+  hangup)` → clean worker teardown; process served multiple sequential
+  calls on fresh transports; SIGINT disconnected cleanly.
+- "Few hundred lines" estimate: confirmed — 461 lines in
+  `src/pipecat_agentduet/`.
+
+### Lessons for the v1 examples/docs
+
+- **Pipecat's default user-turn stop strategy (Smart Turn v3) judges
+  test phrases as incomplete turns** and stalls the bot's reply by
+  5–15 s (until the stop-timeout, `strategy: None`). Keyless demos must
+  pin `SpeechTimeoutUserTurnStopStrategy(wait_for_transcript=False)`;
+  real STT pipelines can keep the default. Worth a docs callout.
+- Interruptions with an empty buffer (user speaks during bot silence)
+  are normal and log `cleared 0` — harmless.
+
+### Hangup while ringing (matrix rows 2/3, live)
+
+Caller hung up during ring: no connected or disconnected events fired
+(alias-pair rule held), `CancelWorkerFrame(reason: answer failed)` tore the
+pipeline down cleanly, and the process kept serving.
+
+**Observation, root-caused with server-side logs (expected behavior):**
+the caller abandoned the call in the window before the server had SIP
+dialog state for it, so the hangup had nothing to land against — the
+server genuinely never learned the call ended. It therefore neither fails
+the pending `call.answer` nor emits `call.terminated`; the SDK's 10 s
+command timeout is the **designed fallback** for this window, and the
+`call.terminated` seen server-side (09:05:48.614, 222 ms after the client
+timeout) was triggered by the SDK's own teardown closing the media
+connection. Consequence to document (not a defect): a call abandoned in
+this window occupies a pipeline for ~10 s before the timeout reclaims it.
+The transport needs no change and would handle an earlier signal, if one
+ever exists, identically but faster.
+
+### Outbound track probe (§8 item 4) — RESOLVED
+
+`examples/outbound_track_probe.py`, 2026-08-11: subscriber `+6590114731`
+dialled `+84972840068`; `caller == subscriber`, `callee == ` the dialled
+number. Bytes received over a 10 s window with the remote party speaking:
+
+| track | bytes | audio |
+|---|---|---|
+| `callee` (track 1) | 317 440 | 9.92 s — continuous |
+| `caller` (track 0) | **0** | nothing at all |
+
+Conclusions:
+
+1. **The parent spec §3 rule is correct**: on an outbound call the remote
+   party's audio is on `call.callee`. The transport's subscriber-derived
+   rule (`remote_party` = the party whose `value != call.subscriber`)
+   selects `callee` here, so it is right in both directions with no need
+   for a public `origin` accessor.
+2. **`VoiceAgent._bridge` has a confirmed outbound bug.** It reads
+   `call.caller.audio_stream()` on every path
+   (`voice_agent.py:334`, reached from `_place_outbound`), which on an
+   outbound call is the agent's own leg — track 0, empirically 0 bytes.
+   The model therefore never hears the callee: outbound VoiceAgent calls
+   are deaf (agent→callee audio still works). Fix belongs in the SDK
+   repo, not here — read the non-subscriber party, exactly as this
+   transport does.
+
+### Still open
+
+- Ring-buffer drain-on-close (§3 open item): does a farewell fully play
+  out when the bot ends the call? Not yet checked by ear. Deferred to v1.
