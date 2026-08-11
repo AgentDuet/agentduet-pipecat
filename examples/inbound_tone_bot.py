@@ -1,11 +1,15 @@
-"""Keyless spike bot: answers an inbound call, plays a tone after each user
-turn, stops the tone on barge-in. No STT/LLM/TTS keys needed.
+"""Keyless spike bot: answers an inbound call and plays a continuous tone.
+Speaking pauses the tone (barge-in); it resumes ~0.6 s after you stop. No
+STT/LLM/TTS keys needed.
 
 Env: AGENTDUET_API_KEY, AGENTDUET_CONNECTOR_UUID, optional AGENTDUET_BASE_URL.
 Run:  uv run --group example python examples/inbound_tone_bot.py
-Then call the connector's number. Speak; after you stop, a tone plays for up
-to 5 s. Speak over it: it must stop (barge-in). Watch the log for the
-"barge-in: cleared N buffered bytes, ack in M ms" measurement lines.
+Then call the connector's number: the tone starts as soon as the call is
+answered. Speak over it — it must cut off quickly. The tone is kept a few
+seconds deep in the SDK's outgoing buffer on purpose, so every barge-in
+exercises the real server-side flush; the log's
+"barge-in: cleared N buffered bytes, ack in M ms" lines are the spike's
+measurement (expect N in the tens of KB).
 """
 
 import os
@@ -29,9 +33,12 @@ from agentduet import (
 from dotenv import load_dotenv
 from pipecat.audio.vad.silero import SileroVADAnalyzer
 from pipecat.frames.frames import (
+    CancelFrame,
+    EndFrame,
     Frame,
     InterruptionFrame,
     OutputAudioRawFrame,
+    StartFrame,
     UserStoppedSpeakingFrame,
 )
 from pipecat.pipeline.pipeline import Pipeline
@@ -61,42 +68,69 @@ def _require_env(name: str) -> str:
 
 
 class ToneBot(FrameProcessor):
-    """Plays a sine tone after each user turn; stops it on interruption."""
+    """Plays a continuous sine tone; barge-in pauses it, it resumes after the
+    user's turn ends.
 
-    def __init__(self, *, freq: float = 440.0, seconds: float = 5.0, amplitude: float = 0.3):
+    The tone is generated in bursts (BURST_SECS pushed at once, then a pause)
+    rather than paced chunk-by-chunk, so the SDK's outgoing ring buffer stays
+    a few seconds deep. A barge-in then has to flush real audio from the
+    server side — the strongest test of `clear_send_audio_buffer()`, and the
+    source of a meaningful "cleared N bytes" measurement. Phase is carried
+    across bursts and resumes so the tone never clicks.
+    """
+
+    BURST_SECS = 2.0
+    REFILL_INTERVAL_SECS = 1.0  # buffer depth oscillates ~1-3 s
+
+    def __init__(self, *, freq: float = 440.0, amplitude: float = 0.3):
         super().__init__()
         self._freq = freq
-        self._seconds = seconds
         self._amplitude = amplitude
         self._gen_task = None
+        self._phase = 0  # sample counter, continuous across bursts/resumes
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
         await super().process_frame(frame, direction)
-        if isinstance(frame, InterruptionFrame):
-            if self._gen_task is not None:
-                await self.cancel_task(self._gen_task)
-                self._gen_task = None
+        if isinstance(frame, StartFrame):
+            # Tone from the moment the pipeline is up: the output transport
+            # holds data frames until the call is answered, so the caller
+            # hears it right at answer.
+            self._start_tone()
+        elif isinstance(frame, InterruptionFrame):
+            # User started speaking: stop producing. The pipeline clears its
+            # own queues and the transport flushes the SDK/server buffer.
+            await self._stop_tone()
         elif isinstance(frame, UserStoppedSpeakingFrame):
-            if self._gen_task is not None:
-                await self.cancel_task(self._gen_task)
-            self._gen_task = self.create_task(self._play_tone())
+            self._start_tone()  # user's turn ended: resume
+        elif isinstance(frame, (EndFrame, CancelFrame)):
+            await self._stop_tone()
         await self.push_frame(frame, direction)
+
+    def _start_tone(self):
+        if self._gen_task is None:
+            self._gen_task = self.create_task(self._play_tone())
+
+    async def _stop_tone(self):
+        if self._gen_task is not None:
+            await self.cancel_task(self._gen_task)
+            self._gen_task = None
 
     async def _play_tone(self):
         chunk_samples = SAMPLE_RATE // 50  # 20 ms
-        total_chunks = int(self._seconds * 50)
+        chunks_per_burst = int(self.BURST_SECS * 50)
         peak = int(32767 * self._amplitude)
-        sample_index = 0
-        for _ in range(total_chunks):
-            samples = [
-                int(peak * math.sin(2 * math.pi * self._freq * (sample_index + i) / SAMPLE_RATE))
-                for i in range(chunk_samples)
-            ]
-            sample_index += chunk_samples
-            pcm = struct.pack(f"<{chunk_samples}h", *samples)
-            await self.push_frame(
-                OutputAudioRawFrame(audio=pcm, sample_rate=SAMPLE_RATE, num_channels=1)
-            )
+        while True:
+            for _ in range(chunks_per_burst):
+                samples = [
+                    int(peak * math.sin(2 * math.pi * self._freq * (self._phase + i) / SAMPLE_RATE))
+                    for i in range(chunk_samples)
+                ]
+                self._phase += chunk_samples
+                pcm = struct.pack(f"<{chunk_samples}h", *samples)
+                await self.push_frame(
+                    OutputAudioRawFrame(audio=pcm, sample_rate=SAMPLE_RATE, num_channels=1)
+                )
+            await asyncio.sleep(self.REFILL_INTERVAL_SECS)
 
 
 async def run_call(sm: SessionManager, noti: IncomingCallNotification):
