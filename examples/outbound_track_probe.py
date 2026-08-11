@@ -2,9 +2,11 @@
 the remote party's audio. Settles the VoiceAgent caller/callee discrepancy
 with data before the outbound transport round is designed.
 
-Env: AGENTDUET_API_KEY, AGENTDUET_CONNECTOR_UUID, optional AGENTDUET_BASE_URL,
+Env (read from the environment or a .env file in the repo root):
+AGENTDUET_API_KEY, AGENTDUET_CONNECTOR_UUID, optional AGENTDUET_BASE_URL,
 PROBE_SUBSCRIBER (the line to call from), PROBE_DEST (E.164 number to call).
-Run:  uv run python examples/outbound_track_probe.py
+Run:  PROBE_SUBSCRIBER=+65… PROBE_DEST=+65… \
+          uv run --group example python examples/outbound_track_probe.py
 Answer the phone and speak; the probe logs bytes per track for 10 s.
 """
 
@@ -14,6 +16,7 @@ import os
 import uuid
 
 from agentduet import Address, CallAudioConfig, SessionManager, SessionManagerConfig
+from dotenv import load_dotenv
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("probe")
@@ -38,6 +41,7 @@ async def count_bytes(name: str, party, results: dict):
 
 
 async def main():
+    load_dotenv()  # same .env the tone-bot example uses
     api_key = _require_env("AGENTDUET_API_KEY")
     connector_uuid = _require_env("AGENTDUET_CONNECTOR_UUID")
     probe_subscriber = _require_env("PROBE_SUBSCRIBER")
