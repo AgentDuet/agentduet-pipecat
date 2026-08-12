@@ -55,12 +55,24 @@ _EVENT_NAMES = (
 class AgentDuetTransport(BaseTransport):
     """Bridges a live AgentDuet Call and a Pipecat pipeline.
 
-    Takes an attached-but-not-yet-answered Call; answers on pipeline start,
-    closes the call on pipeline end, cancels the pipeline on remote hangup.
+    Takes an attached-but-not-yet-answered Call; answers (inbound) or dials
+    (outbound) on pipeline start, closes the call on pipeline end, cancels
+    the pipeline on remote hangup. `ring_time_seconds` (1-120, default 60)
+    bounds the outbound ring; ignored on inbound.
     """
 
-    def __init__(self, call, params: TransportParams | None = None):
+    def __init__(
+        self,
+        call,
+        params: TransportParams | None = None,
+        *,
+        ring_time_seconds: int = 60,
+    ):
         super().__init__()
+        # Validated here, not left to the SDK: dial() runs inside a spawned
+        # task after pipeline start, where a ValueError would be invisible.
+        if not 1 <= ring_time_seconds <= 120:
+            raise ValueError("ring_time_seconds must be between 1 and 120")
         rate = call.audio_config.sample_rate
         params = params or TransportParams(audio_in_enabled=True, audio_out_enabled=True)
         for attr in ("audio_in_sample_rate", "audio_out_sample_rate"):
@@ -76,7 +88,7 @@ class AgentDuetTransport(BaseTransport):
         self._params = params.model_copy(
             update={"audio_in_sample_rate": rate, "audio_out_sample_rate": rate}
         )
-        self._session = _AgentDuetSession(call, self)
+        self._session = _AgentDuetSession(call, self, ring_time_seconds=ring_time_seconds)
         self._input: AgentDuetInputTransport | None = None
         self._output: AgentDuetOutputTransport | None = None
 
@@ -134,15 +146,18 @@ class AgentDuetInputTransport(BaseInputTransport):
     async def start(self, frame: StartFrame):
         await super().start(frame)
         # Ready first: _audio_in_queue exists only after set_transport_ready,
-        # and audio can arrive the instant answer() succeeds server-side.
+        # and audio can arrive the instant answer()/dial() succeeds server-side.
         await self.set_transport_ready(frame)
-        # Pump before answer: audio_stream() is order-independent and lazily
-        # bound, so no first words are dropped while the pipeline wires up.
+        # Pump before establish: audio_stream() is order-independent and
+        # lazily bound, so no first words are dropped while the pipeline
+        # wires up.
         self._pump_task = self.create_task(self._pump())
-        # A user-initiated CancelFrame arriving here queues behind this
-        # in-flight answer() (up to its ~60 s ring timeout) since start() must
-        # return before cancel() runs on this same processor. Remote hangup is
-        # unaffected: it aborts answer() itself via CallClosedError.
+        # Inbound only: a user-initiated CancelFrame arriving here queues
+        # behind this in-flight answer() (up to its ~60 s ring timeout) since
+        # start() must return before cancel() runs on this same processor.
+        # Remote hangup is unaffected: it aborts answer() itself via
+        # CallClosedError. On outbound, session.start() returns as soon as
+        # the dial() task is spawned, so nothing queues behind it.
         await self._session.start()
 
     async def stop(self, frame: EndFrame):
