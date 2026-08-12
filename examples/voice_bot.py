@@ -48,8 +48,6 @@ logger = logging.getLogger("voice_bot")
 
 SAMPLE_RATE = 16000  # Silero VAD supports 8k/16k only; 16k is the default
 
-# Arbitrary default (British Reading Lady) — not vetted for quality, just a
-
 _call_tasks: set[asyncio.Task] = set()
 
 
