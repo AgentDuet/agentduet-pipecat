@@ -459,10 +459,35 @@ agentduet 1.0.0 stable. Same measurement conventions as the spike results.
    behavior is per spec on every observable; the fix is a protocol
    addition, not transport code.
 
-### Still pending (Task 10 steps 3–5)
+### Showcase bot live (Task 10 step 3) — 2026-08-12
 
-- `voice_bot.py` live conversation + barge-in mid-reply (needs
-  Deepgram/OpenAI/Cartesia keys).
-- Farewell drain-on-close by ear (the spike's carried-over open item).
+`voice_bot.py` (Deepgram STT → Gemini 3.5 Flash-Lite → Deepgram Aura TTS,
+two vendor keys), 1-minute inbound conversation:
+
+- **Greeting-first worked**: `on_dialin_connected` → `LLMRunFrame` →
+  first TTS audio ~1.4 s after connect.
+- **Full multi-turn conversation with carried context** (weather in
+  Paris → "How about London?" resolved correctly from history).
+- **Voice-to-voice latency ~0.9 s** (user turn end → LLM first token
+  ~600 ms → bot speaking), Gemini 3.5 Flash-Lite.
+- **Real barge-in mid-reply**: user spoke while 58 880 B (1.84 s) of a
+  reply was still buffered — cleared, ack 37 ms. Note: with the
+  universal aggregator, an interruption produces *two* clear calls (the
+  aggregator and UserTurnProcessor both broadcast); harmless —
+  `clear_send_audio_buffer` is idempotent and both ack ~36 ms.
+- **Smart Turn v3 observed doing its job**: instant COMPLETE verdicts on
+  clear turn ends; one trailing "Okay. I bye." judged INCOMPLETE and
+  resolved by the 3 s stop-secs fallback — the exact behavior class the
+  keyless-pipeline gotcha documents, here working as designed.
+- Farewell data point (weak form): the bot's "Goodbye!" reply fully
+  played before the caller hung up 8 s later — no truncation. The strong
+  form (bot-initiated close draining the buffer) remains untested.
+- Clean teardown including both Deepgram websockets on remote hangup.
+
+### Still pending (Task 10 steps 4–5)
+
+- Farewell drain-on-close by ear, strong form: bot-initiated
+  `call.close()` right after queueing a goodbye (the spike's
+  carried-over open item). Needs a small temp bot variant.
 - WA follow-up path (`call_and_wa_followup.py`) — WA connector or
   `WA_FOLLOWUP_TO` fallback.
