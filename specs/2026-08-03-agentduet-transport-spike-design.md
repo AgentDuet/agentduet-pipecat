@@ -392,9 +392,15 @@ Conclusions:
 
 ## v1 results (live validation, 2026-08-12)
 
-Setup: 16 kHz connector, TELCO remote party (+8497…), keyless tone
-pipelines from the v1 branch (`v1/transport`), pipecat-ai 1.7.0,
-agentduet 1.0.0 stable. Same measurement conventions as the spike results.
+Setup: 16 kHz connector, remote party +8497… dialing in over **both
+TELCO and WhatsApp across the runs** (mixed, per the operator; the
+outbound dials were explicitly `Network.TELCO`). Keyless tone pipelines
+plus the showcase bot from the v1 branch, pipecat-ai 1.7.0, agentduet
+1.0.0 stable. Same measurement conventions as the spike results.
+Incidental but valuable: some inbound runs — including the showcase
+conversation — arrived as **WhatsApp voice calls**, so voice-over-WA
+through the identical transport code is live-validated; the pipeline is
+network-agnostic by design and nothing needed to change.
 
 ### Inbound (v1 refactored answer path, plan Task 10 step 3 — tone bot only)
 
