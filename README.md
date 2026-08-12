@@ -14,6 +14,8 @@ Requires Python >= 3.12. The quickstart below also needs Pipecat's service extra
 
 ## Inbound quickstart
 
+A *connector* is a provisioned phone/WhatsApp number (or number pool) on the AgentDuet platform; your bot process attaches to one and receives its calls. The API key and connector UUID come from your AgentDuet workspace/portal.
+
 A complete bot: answers calls on your connector, greets the caller, and runs a Deepgram → OpenAI → Cartesia cascade. Save as `bot.py`, set `AGENTDUET_API_KEY`, `AGENTDUET_CONNECTOR_UUID`, `DEEPGRAM_API_KEY`, `OPENAI_API_KEY`, and `CARTESIA_API_KEY`, run `python bot.py`, then call your connector's number.
 
 ```python
@@ -42,6 +44,7 @@ from pipecat_agentduet import AgentDuetTransport
 
 
 async def run_call(sm: SessionManager, noti: IncomingCallNotification):
+    # any unique session id + the called number's subscriber
     session = await sm.open_session(uuid.uuid4().hex, noti.subscriber)
     transport = AgentDuetTransport(await session.process_call(noti))
     context = LLMContext([{"role": "system", "content": "You are a helpful assistant on a phone call."}])
@@ -101,7 +104,11 @@ Coming from the Twilio-family quickstarts, here is what you did **not** have to 
 Same transport, same pipeline — you make the call instead of waiting for one:
 
 ```python
-from agentduet import Address, Network
+import uuid
+
+from agentduet import Address, Network, SessionManager, SessionManagerConfig
+
+from pipecat_agentduet import AgentDuetTransport
 
 
 async def main():
@@ -109,7 +116,7 @@ async def main():
     async with SessionManager(config) as sm:
         session = await sm.open_session(uuid.uuid4().hex, "+6512340000")  # the line to call from
         call = await session.make_call(Address(Network.TELCO, "+6598760000"))
-        transport = AgentDuetTransport(call, ring_time_seconds=45)
+        transport = AgentDuetTransport(call, ring_time_seconds=45)  # default 60, range 1-120
 
         @transport.event_handler("on_dialout_answered")
         async def on_answered(t, payload):
@@ -147,7 +154,7 @@ Audio is mono 16-bit PCM at the connector's fixed rate — 8000, 16000, or 24000
 
 ## Gotchas
 
-- **Keyless / no-STT pipelines must pin the turn-stop strategy.** Pipecat's default user-turn stop strategy is the Smart Turn v3 semantic model, which needs a transcript to judge; with no STT it judges phrases as incomplete turns and stalls the bot's reply 5–15 s until the stop timeout (observed on live validation). Pin `UserTurnProcessor(user_turn_strategies=UserTurnStrategies(stop=[SpeechTimeoutUserTurnStopStrategy(wait_for_transcript=False)]))` as the tone-bot examples do. Real STT pipelines keep the default.
+- **Keyless / no-STT pipelines must pin the turn-stop strategy.** Pipecat's default user-turn stop strategy is the Smart Turn v3 semantic model, which needs a transcript to judge; with no STT it judges phrases as incomplete turns and stalls the bot's reply 5–15 s until the stop timeout (observed on live validation). Pin `UserTurnProcessor(user_turn_strategies=UserTurnStrategies(stop=[SpeechTimeoutUserTurnStopStrategy(wait_for_transcript=False)]))` as the tone-bot examples do (`from pipecat.turns.user_stop import SpeechTimeoutUserTurnStopStrategy`, `from pipecat.turns.user_turn_strategies import UserTurnStrategies`). Real STT pipelines keep the default.
 - **A caller who abandons during ring can occupy a pipeline for ~10 s.** If the caller hangs up before the server has SIP dialog state for the call, the hangup has nothing to land against and the server never learns the call ended; the SDK's 10 s command timeout is the designed fallback that reclaims the pipeline. Expected behavior (root-caused with server logs), not a defect — no connected/disconnected events fire for such calls.
 
 ## Scaling
