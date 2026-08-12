@@ -9,6 +9,9 @@ AGENTDUET_API_KEY, AGENTDUET_CONNECTOR_UUID, optional AGENTDUET_BASE_URL,
 DEEPGRAM_API_KEY (STT and TTS), GOOGLE_API_KEY, optional DEEPGRAM_TTS_VOICE.
 Run:  uv run --group example python examples/voice_bot.py
 Then call the connector's number. The bot greets you first, then converses.
+Say "bye" to end the call from the bot side: it speaks a farewell, the
+pipeline ends, and the transport closes the call — listen for whether the
+farewell plays out fully (drain-on-close check).
 """
 
 import os
@@ -19,6 +22,7 @@ os.environ.setdefault("NLTK_DISABLE_IMPORT_SECURITY", "1")
 
 import asyncio
 import logging
+import re
 import uuid
 
 from agentduet import (
@@ -29,12 +33,19 @@ from agentduet import (
 )
 from dotenv import load_dotenv
 from pipecat.audio.vad.silero import SileroVADAnalyzer
-from pipecat.frames.frames import LLMRunFrame
+from pipecat.frames.frames import (
+    BotStoppedSpeakingFrame,
+    EndWorkerFrame,
+    Frame,
+    LLMRunFrame,
+    TranscriptionFrame,
+)
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.worker import PipelineWorker
 from pipecat.processors.aggregators.llm_context import LLMContext
 from pipecat.processors.aggregators.llm_response_universal import LLMContextAggregatorPair
 from pipecat.processors.audio.vad_processor import VADProcessor
+from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 from pipecat.services.deepgram.stt import DeepgramSTTService
 from pipecat.services.deepgram.tts import DeepgramTTSService
 from pipecat.services.google.llm import GoogleLLMService
@@ -49,6 +60,38 @@ logger = logging.getLogger("voice_bot")
 SAMPLE_RATE = 16000  # Silero VAD supports 8k/16k only; 16k is the default
 
 _call_tasks: set[asyncio.Task] = set()
+
+_GOODBYE = re.compile(r"\b(good\s*bye|bye|hang up)\b", re.IGNORECASE)
+
+
+class EndCallOnGoodbye(FrameProcessor):
+    """Ends the call from the bot side after a farewell.
+
+    When the caller's transcript contains a goodbye, arm; when the bot then
+    finishes speaking its reply, push EndWorkerFrame upstream. The worker
+    converts it to an EndFrame that traverses the pipeline *behind* the
+    farewell audio, so the transport closes the call only after both halves
+    finish their graceful stop — demonstrating the "pipeline done means call
+    ends" contract with zero lifecycle code, and exercising the
+    drain-on-close question: any farewell audio still in the SDK's client
+    ring buffer when close() lands is dropped locally, so a truncated
+    goodbye here is the signal that the SDK needs a drain-before-close.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self._armed = False
+
+    async def process_frame(self, frame: Frame, direction: FrameDirection):
+        await super().process_frame(frame, direction)
+        if isinstance(frame, TranscriptionFrame) and _GOODBYE.search(frame.text):
+            logger.info("goodbye heard; ending after the bot's farewell")
+            self._armed = True
+        elif self._armed and isinstance(frame, BotStoppedSpeakingFrame):
+            self._armed = False
+            logger.info("farewell finished; ending pipeline (transport will close the call)")
+            await self.push_frame(EndWorkerFrame(), FrameDirection.UPSTREAM)
+        await self.push_frame(frame, direction)
 
 
 def _require_env(name: str) -> str:
@@ -107,6 +150,9 @@ async def run_call(
             llm,
             tts,
             transport.output(),
+            # Sees the downstream TranscriptionFrame + BotStoppedSpeakingFrame
+            # copies; must sit after the output transport.
+            EndCallOnGoodbye(),
             aggregators.assistant(),
         ]
     )
