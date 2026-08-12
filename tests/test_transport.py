@@ -365,6 +365,10 @@ class TestOutboundPipeline:
         async def on_disconnected(t, payload):
             seen.append("disconnected")
 
+        @transport.event_handler("on_dialout_error")
+        async def on_dialout_error(t, payload):
+            seen.append("error")
+
         worker = make_worker(Pipeline([transport.input(), FrameCapture()]))
         run_task = await run_worker(worker)
         await asyncio.sleep(0.1)  # dial spawned, gated on dial_gate
@@ -380,6 +384,10 @@ class TestOutboundPipeline:
             await asyncio.sleep(0.01)
         assert call.close_calls >= 1
         call.dial_gate.set()  # dial() now observes TERMINATED, resolves silently
+        # Drain the dial task deterministically: also propagates any
+        # unexpected exception from _establish instead of letting the
+        # done-callback merely log it while this test passes regardless.
+        await asyncio.wait_for(transport._session._establish_task, timeout=1.0)
 
         await asyncio.wait_for(run_task, timeout=5)
         assert seen == []
