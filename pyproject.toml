@@ -1,19 +1,60 @@
 [project]
 name = "pipecat-agentduet"
-version = "0.1.0.dev0"
+version = "0.1.0"
 description = "AgentDuet transport for Pipecat: phone/WhatsApp calls in any Pipecat pipeline"
+readme = "README.md"
 requires-python = ">=3.12"
+license = "BSD-2-Clause"
+license-files = ["LICENSE"]
+authors = [{ name = "AgentDuet" }]
+keywords = [
+    "pipecat",
+    "agentduet",
+    "voice-ai",
+    "telephony",
+    "whatsapp",
+    "voice-agent",
+    "transport",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Framework :: AsyncIO",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Communications :: Telephony",
+    "Topic :: Multimedia :: Sound/Audio",
+    "Topic :: Software Development :: Libraries",
+    "Typing :: Typed",
+]
 dependencies = [
     "agentduet>=1.0.0,<2",
     "pipecat-ai>=1.7,<2",
 ]
 
+[project.urls]
+Homepage = "https://github.com/AgentDuet/agentduet-pipecat"
+Repository = "https://github.com/AgentDuet/agentduet-pipecat"
+Issues = "https://github.com/AgentDuet/agentduet-pipecat/issues"
+
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/pipecat_agentduet"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "src/",
+    "tests/",
+    "examples/",
+    "conftest.py",
+    "README.md",
+    "LICENSE",
+]
 
 [dependency-groups]
 dev = [
@@ -37,3 +78,8 @@ timeout = 30
 [tool.ruff]
 line-length = 100
 target-version = "py312"
+
+[tool.ruff.format]
+# Ruff also formats Python code blocks inside Markdown. The spec docs' code
+# sketches are prose-shaped illustrations, not source; leave them alone.
+exclude = ["*.md"]
