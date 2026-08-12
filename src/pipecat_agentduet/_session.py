@@ -42,9 +42,29 @@ class _AgentDuetSession:
     ``_fire(event_name, payload)`` and ``_request_worker_cancel(reason)``.
     """
 
-    def __init__(self, call, notifier):
+    def __init__(self, call, notifier, *, ring_time_seconds: int = 60):
         self._call = call
         self._notifier = notifier
+        # Direction: on a make_call shell the SDK sets caller == subscriber; on
+        # an IncomingCallNotification attach, caller is the external party. Same
+        # public predicate remote_party uses — state can't discriminate (every
+        # Call constructs in NEW) and _origin is private. Known limit: an
+        # OutgoingCallNotification attach (copilot shape, v1 non-goal) also has
+        # caller == subscriber; dial() on it raises CallStateError, which the
+        # establish path maps to a clean on_dialout_error + cancel. Durable fix
+        # is a public Call.origin on the SDK (feature request filed).
+        self._outbound = call.caller.value == call.subscriber
+        self._ring_time_seconds = ring_time_seconds
+        if self._outbound:
+            self._connected_event = "on_dialout_answered"
+            self._stopped_event = "on_dialout_stopped"
+            self._error_event = "on_dialout_error"
+            self._fail_reason = "dial failed"
+        else:
+            self._connected_event = "on_dialin_connected"
+            self._stopped_event = "on_dialin_stopped"
+            self._error_event = "on_dialin_error"
+            self._fail_reason = "answer failed"
         self._start_begun = False
         self._start_complete = asyncio.Event()
         self._connected_fired = False
@@ -113,7 +133,7 @@ class _AgentDuetSession:
                 # the hangup path owns all signaling for this call.
                 return
             self._connected_fired = True
-            await self._notifier._fire("on_dialin_connected", self._payload())
+            await self._notifier._fire(self._connected_event, self._payload())
             await self._fire_state()
         finally:
             self._start_complete.set()
@@ -126,11 +146,11 @@ class _AgentDuetSession:
             return
         already_torn_down = self._torn_down
         self._torn_down = True
-        logger.debug("call %s answer failed: %s", self._call.id, result.error_code)
-        await self._notifier._fire("on_dialin_error", result)
+        logger.debug("call %s %s: %s", self._call.id, self._fail_reason, result.error_code)
+        await self._notifier._fire(self._error_event, result)
         if not already_torn_down:
             await self._fire_state()
-        await self._request_cancel("answer failed")
+        await self._request_cancel(self._fail_reason)
 
     async def _fire_state(self) -> None:
         state = self._call.state
@@ -193,7 +213,7 @@ class _AgentDuetSession:
             payload = self._payload()
             # Awaited: the app's last chance to flush/log before disconnect.
             await self._notifier._fire("on_before_disconnect", payload)
-            await self._notifier._fire("on_dialin_stopped", payload)
+            await self._notifier._fire(self._stopped_event, payload)
         await self._fire_state()
         if not self._self_initiated:
             await self._request_cancel("remote hangup")

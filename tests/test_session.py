@@ -183,3 +183,17 @@ class TestTeardown:
         assert "on_dialin_error" not in names
         assert "on_dialin_connected" not in names
         assert notifier.cancel_reasons == []
+
+
+class TestDirectionDetection:
+    async def test_outbound_shell_detected_by_caller_eq_subscriber(self):
+        session = _AgentDuetSession(FakeCall.outbound(), RecordingNotifier())
+        assert session._outbound is True
+
+    async def test_inbound_call_detected_despite_new_state(self):
+        # Real inbound calls are ALSO CallState.NEW at construction; only the
+        # caller/subscriber relation discriminates.
+        call = FakeCall()
+        assert call.state == CallState.NEW
+        session = _AgentDuetSession(call, RecordingNotifier())
+        assert session._outbound is False
