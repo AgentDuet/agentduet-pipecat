@@ -389,3 +389,80 @@ Conclusions:
 
 - Ring-buffer drain-on-close (§3 open item): does a farewell fully play
   out when the bot ends the call? Not yet checked by ear. Deferred to v1.
+
+## v1 results (live validation, 2026-08-12)
+
+Setup: 16 kHz connector, TELCO remote party (+8497…), keyless tone
+pipelines from the v1 branch (`v1/transport`), pipecat-ai 1.7.0,
+agentduet 1.0.0 stable. Same measurement conventions as the spike results.
+
+### Inbound (v1 refactored answer path, plan Task 10 step 3 — tone bot only)
+
+- Full lifecycle re-validated through the refactored `_establish()` path:
+  connect/disconnect alias events once each, ~25 turns over a 2.6-minute
+  call, remote hangup → clean teardown.
+- **Barge-in ack: 34–46 ms** (n≈25), tighter than the spike's 47–72 ms.
+  The interrupt command leaves within ~3 ms of the VAD event on every
+  sample — the transport-side latency is constant.
+- **Perceived barge-in latency variance root-caused to VAD onset, not
+  the transport.** With pipecat defaults (`confidence=0.7`,
+  `start_secs=0.2`, `min_volume=0.6`), a soft or gradual speech onset
+  hovers around the thresholds and detection can take 0.5–1 s+, while a
+  sharp onset trips in ~0.3–0.4 s. Demo tuning knobs (`start_secs`,
+  `min_volume` on the VAD params) trade snappiness for false triggers;
+  documented as pipeline tuning, not transport behavior.
+- **One unresolved intermittent: a mid-call inbound-media stall.** On one
+  call, inbound audio stopped reaching the pipeline ~50 s in (no VAD
+  events for 36 s) while the same websocket stayed healthy in both the
+  control direction (interrupt acks unchanged) and the outbound media
+  direction, and delivered the eventual hangup instantly — ruling out a
+  client-side WS/receive-loop stall. Not reproduced on an instrumented
+  2.6-minute follow-up call (rock-steady 32 000 B/s inbound; line-silence
+  floor measures peak≈13). Upstream of the SDK client: either the server
+  stopped forwarding caller media or the carrier stopped delivering RTP.
+  Discriminators for recurrence (temp AudioMeter diagnostic): 0 B/s ⇒
+  server stopped forwarding; ~32 000 B/s with peak≈0 while the caller
+  speaks ⇒ carrier one-way audio.
+
+### Outbound (plan Task 10 steps 1–2 — the never-live-tested v1 path)
+
+1. **Answered.** Dial spawned at pipeline start; resolved answered after
+   ~10 s of ring. `on_dialout_answered` + generic `on_client_connected`
+   fired once each; tone + barge-in on the callee track healthy (acks
+   46–48 ms, clears 0–94 KB depending on interrupt position); remote
+   hangup → `CancelWorkerFrame(reason: remote hangup)` → clean worker
+   exit and SessionManager disconnect.
+2. **Unanswered.** Resolved at exactly `ring_time_seconds` (45.3 s
+   observed for 45) with `error_code=TIMEOUT` — the client-side deadline;
+   this route never reported `CALL_UNANSWERED`. **Which code surfaces is
+   route/carrier-dependent** — apps must treat
+   `{CALL_UNANSWERED, TIMEOUT}` as one "nobody picked up" outcome family,
+   never branch on one of them. No connected/disconnected events;
+   `on_dialout_error` once; clean teardown.
+   **Live cancel-reason ordering settled:** the SDK's force-close on a
+   falsy dial fires the synthesized hangup ~1 ms *before* `dial()`
+   returns, so the worker cancel carries `reason: remote hangup` and the
+   later "dial failed" cancel is deduped. This is exactly the
+   hangup-before-return ordering `FakeCall.dial()` models — live behavior
+   matches the test double.
+3. **Rejected while ringing.** On this route, indistinguishable from
+   unanswered: `TIMEOUT` after the full 45 s. The decline never reached
+   the SDK as a distinct signal (undetermined whether the carrier
+   swallowed it or the server didn't map it — server logs for the call
+   would split that). **Carrier-dependent by nature**: a route that does
+   propagate the reject would presumably resolve fast with
+   `CALL_UNANSWERED` — apps and docs must be prepared for both shapes
+   (fast server-reported failure *or* full-ring-time timeout).
+   **Confirms parent spec §10 gap 2 (dial progress) with live data**:
+   on routes like this one, a rejected outbound call burns the full
+   `ring_time_seconds` before the pipeline is reclaimed. Transport
+   behavior is per spec on every observable; the fix is a protocol
+   addition, not transport code.
+
+### Still pending (Task 10 steps 3–5)
+
+- `voice_bot.py` live conversation + barge-in mid-reply (needs
+  Deepgram/OpenAI/Cartesia keys).
+- Farewell drain-on-close by ear (the spike's carried-over open item).
+- WA follow-up path (`call_and_wa_followup.py`) — WA connector or
+  `WA_FOLLOWUP_TO` fallback.
