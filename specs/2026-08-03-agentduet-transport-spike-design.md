@@ -426,7 +426,7 @@ network-agnostic by design and nothing needed to change.
   2.6-minute follow-up call (rock-steady 32 000 B/s inbound; line-silence
   floor measures peak≈13). Upstream of the SDK client: either the server
   stopped forwarding caller media or the carrier stopped delivering RTP.
-  Discriminators for recurrence (temp AudioMeter diagnostic): 0 B/s ⇒
+  Discriminators for recurrence (`examples/_audio_meter.py`, wire per its docstring): 0 B/s ⇒
   server stopped forwarding; ~32 000 B/s with peak≈0 while the caller
   speaks ⇒ carrier one-way audio.
 
