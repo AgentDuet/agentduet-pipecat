@@ -55,8 +55,10 @@ _EVENT_NAMES = (
 class AgentDuetTransport(BaseTransport):
     """Bridges a live AgentDuet Call and a Pipecat pipeline.
 
-    Takes an attached-but-not-yet-answered Call; answers on pipeline start,
-    closes the call on pipeline end, cancels the pipeline on remote hangup.
+    Takes an attached-but-not-yet-answered Call; answers (inbound) or dials
+    (outbound) on pipeline start, closes the call on pipeline end, cancels
+    the pipeline on remote hangup. `ring_time_seconds` (1-120, default 60)
+    bounds the outbound ring; ignored on inbound.
     """
 
     def __init__(
@@ -144,10 +146,11 @@ class AgentDuetInputTransport(BaseInputTransport):
     async def start(self, frame: StartFrame):
         await super().start(frame)
         # Ready first: _audio_in_queue exists only after set_transport_ready,
-        # and audio can arrive the instant answer() succeeds server-side.
+        # and audio can arrive the instant answer()/dial() succeeds server-side.
         await self.set_transport_ready(frame)
-        # Pump before answer: audio_stream() is order-independent and lazily
-        # bound, so no first words are dropped while the pipeline wires up.
+        # Pump before establish: audio_stream() is order-independent and
+        # lazily bound, so no first words are dropped while the pipeline
+        # wires up.
         self._pump_task = self.create_task(self._pump())
         # Inbound only: a user-initiated CancelFrame arriving here queues
         # behind this in-flight answer() (up to its ~60 s ring timeout) since
