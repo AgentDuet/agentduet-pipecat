@@ -7,7 +7,8 @@ AGENTDUET_API_KEY, AGENTDUET_CONNECTOR_UUID, optional AGENTDUET_BASE_URL,
 PROBE_SUBSCRIBER (the line to call from), PROBE_DEST (E.164 number to call).
 Run:  uv run --group example python examples/outbound_tone_bot.py
 Your phone rings; answer it and speak. After you stop, a tone plays for up
-to 5 s. Speak over it: it must stop (barge-in).
+to 5 s. Speak over it: it must stop (barge-in). Watch the log for the
+"barge-in: cleared N buffered bytes, ack in M ms" measurement lines.
 """
 
 import os
@@ -119,7 +120,7 @@ async def main():
         runner = WorkerRunner(handle_sigint=True)
         await runner.add_workers(worker)
         await runner.run()
-        logger.info("pipeline finished for call %s", call.id)
+        logger.info("worker exited for call %s", call.id)
 
 
 if __name__ == "__main__":
