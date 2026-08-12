@@ -14,7 +14,7 @@ Requires Python >= 3.12. The quickstart below also needs Pipecat's service extra
 
 ## Inbound quickstart
 
-A complete bot: answers calls on your connector and runs a Deepgram → OpenAI → Cartesia cascade. Save as `bot.py`, set `AGENTDUET_API_KEY`, `AGENTDUET_CONNECTOR_UUID`, `DEEPGRAM_API_KEY`, `OPENAI_API_KEY`, and `CARTESIA_API_KEY`, run `python bot.py`, then call your connector's number.
+A complete bot: answers calls on your connector, greets the caller, and runs a Deepgram → OpenAI → Cartesia cascade. Save as `bot.py`, set `AGENTDUET_API_KEY`, `AGENTDUET_CONNECTOR_UUID`, `DEEPGRAM_API_KEY`, `OPENAI_API_KEY`, and `CARTESIA_API_KEY`, run `python bot.py`, then call your connector's number.
 
 ```python
 import os
@@ -26,6 +26,7 @@ import uuid
 
 from agentduet import IncomingCallNotification, SessionManager, SessionManagerConfig
 from pipecat.audio.vad.silero import SileroVADAnalyzer
+from pipecat.frames.frames import LLMRunFrame
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.worker import PipelineWorker
 from pipecat.processors.aggregators.llm_context import LLMContext
@@ -43,9 +44,8 @@ from pipecat_agentduet import AgentDuetTransport
 async def run_call(sm: SessionManager, noti: IncomingCallNotification):
     session = await sm.open_session(uuid.uuid4().hex, noti.subscriber)
     transport = AgentDuetTransport(await session.process_call(noti))
-    aggregators = LLMContextAggregatorPair(
-        LLMContext([{"role": "system", "content": "You are a helpful assistant on a phone call."}])
-    )
+    context = LLMContext([{"role": "system", "content": "You are a helpful assistant on a phone call."}])
+    aggregators = LLMContextAggregatorPair(context)
     pipeline = Pipeline([
         transport.input(),
         VADProcessor(vad_analyzer=SileroVADAnalyzer()),
@@ -58,6 +58,12 @@ async def run_call(sm: SessionManager, noti: IncomingCallNotification):
         aggregators.assistant(),
     ])
     worker = PipelineWorker(pipeline, idle_timeout_secs=None)
+
+    @transport.event_handler("on_dialin_connected")
+    async def on_connected(t, payload):
+        context.add_message({"role": "developer", "content": "Start by briefly greeting the caller."})
+        await worker.queue_frames([LLMRunFrame()])  # the bot speaks first
+
     runner = WorkerRunner(handle_sigint=False)
     await runner.add_workers(worker)
     await runner.run()
