@@ -514,7 +514,11 @@ aggregator consumes final `TranscriptionFrame`s and pushes nothing
 downstream. The shipped design avoids the issue entirely — the LLM
 decides, via a `hang_up` tool (`FunctionSchema` + `register_function`);
 the handler pushes `EndWorkerFrame` upstream, ordering the EndFrame
-behind the farewell audio by construction.
+behind the farewell audio by construction. The tool path was then itself
+live-validated under the tightest timing: Gemini emitted farewell text +
+`hang_up` in one completion, the EndFrame was queued *before the bot even
+started speaking*, and the farewell still played out fully — the
+frame-ordering guarantee, observed.
 
 ### Still pending (Task 10 step 5)
 
