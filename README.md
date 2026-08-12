@@ -4,11 +4,11 @@ Phone and WhatsApp calls in any [Pipecat](https://github.com/pipecat-ai/pipecat)
 
 ## Install
 
-Not on PyPI yet (publishing is pending a packaging decision); install from source for now. 
-
 ```sh
-pip install git+https://github.com/AgentDuet/agentduet-pipecat.git
+pip install pipecat-agentduet
 ```
+
+Or track `main`: `pip install git+https://github.com/AgentDuet/agentduet-pipecat.git`.
 
 Requires Python >= 3.12. The quickstart below also needs Pipecat's service extras: `pip install "pipecat-ai[silero,deepgram,google]"`.
 

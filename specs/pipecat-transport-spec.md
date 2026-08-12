@@ -403,10 +403,11 @@ backchannel-heavy.
 
 1. **`agentduet` on PyPI**: already satisfied. The SDK ships on pypi.org (TestPyPI is
    staging only); the adapter pins a released version.
-2. **Decision: public adapter repo** (org, name, license). The core SDK can stay
-   proprietary; the adapter cannot. This is the one true blocker for *publishing*
-   the adapter; spike work can start in a private scratch repo (fresh git history,
-   never extracted from the SDK repo).
+2. **Decision: public adapter repo** (org, name, license). ~~The one true blocker for
+   *publishing* the adapter.~~ **Resolved 2026-08-12:** public repo
+   `AgentDuet/agentduet-pipecat`, package `pipecat-agentduet`, licensed
+   **BSD-2-Clause** (copyright AgentDuet) — matching `pipecat-ai` exactly so the
+   §11.3 upstream contribution needs no relicensing. The core SDK stays proprietary.
 
 ## 10. Protocol gaps surfaced by this work
 
@@ -440,8 +441,8 @@ the drift gate), not transport work:
 
 ## 12. Open questions
 
-1. Public-repo mechanics for the adapter (org, name, license) given the undecided
-   open-sourcing posture of the core SDK.
+1. ~~Public-repo mechanics for the adapter (org, name, license).~~ Resolved
+   2026-08-12 — see section 9 prerequisite 2.
 2. Upstream runner contribution details (deferred with it): `create_transport`
    dispatch for our runner-args type, and whether Pipecat Cloud has an always-on
    listener mode that fits a persistent SessionManager connection.

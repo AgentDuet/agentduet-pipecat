@@ -16,7 +16,11 @@ Commands (uv-managed; no CI yet):
 
 `conftest.py` sets `NLTK_DISABLE_IMPORT_SECURITY=1` — nltk's import-security hook false-positives on the project-local `.venv` layout and breaks pipecat imports. Example scripts set it themselves before any pipecat import; any new entrypoint must do the same.
 
-The deliverable is a public package (`pipecat-agentduet`) depending on `agentduet` (the AgentDuet Python SDK, on PyPI) and `pipecat-ai`. Public-repo mechanics (org, name, license) are still an open question (parent spec §12).
+The deliverable is a public package (`pipecat-agentduet`) depending on `agentduet` (the AgentDuet Python SDK, on PyPI) and `pipecat-ai`. Public-repo mechanics are settled (2026-08-12): repo `AgentDuet/agentduet-pipecat`, **BSD-2-Clause** (copyright AgentDuet) — deliberately the same license as `pipecat-ai` so the planned upstream contribution needs no relicensing. Don't change the license without a spec revision.
+
+Releases are cut from `main` by tag; the maintainer uploads with `uv publish` and their own PyPI token (no token lives in CI). `.github/workflows/ci.yml` runs lint + tests on 3.12/3.13 and builds/`twine check`s the distributions on every push and PR.
+
+`ruff format` also reformats Python code blocks inside Markdown, which would mangle the spec docs' illustrative sketches — `[tool.ruff.format] exclude = ["*.md"]` prevents that. `ruff check` (the lint gate) is unaffected. Three Python files predate any format gate and would be reformatted; CI runs `ruff check` only, so don't add `ruff format --check` without reformatting them in a separate commit.
 
 ## What is being built
 
