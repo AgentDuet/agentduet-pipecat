@@ -84,7 +84,7 @@ async def run_call(
     aggregators = LLMContextAggregatorPair(context)
 
     stt = DeepgramSTTService(api_key=deepgram_api_key)
-    llm = GoogleLLMService(api_key=google_api_key)  # default model: gemini-2.5-flash
+    llm = GoogleLLMService(api_key=google_api_key, model="gemini-3.5-flash-lite")
     tts = DeepgramTTSService(api_key=deepgram_api_key, voice=tts_voice)
 
     pipeline = Pipeline(

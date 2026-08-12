@@ -55,7 +55,7 @@ async def run_call(sm: SessionManager, noti: IncomingCallNotification):
         UserTurnProcessor(),
         DeepgramSTTService(api_key=os.environ["DEEPGRAM_API_KEY"]),
         aggregators.user(),
-        GoogleLLMService(api_key=os.environ["GOOGLE_API_KEY"]),
+        GoogleLLMService(api_key=os.environ["GOOGLE_API_KEY"], model="gemini-3.5-flash-lite"),
         DeepgramTTSService(api_key=os.environ["DEEPGRAM_API_KEY"]),  # default voice: aura-2-helena-en
         transport.output(),
         aggregators.assistant(),
