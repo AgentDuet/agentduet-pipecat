@@ -24,7 +24,7 @@ dev = [
 ]
 # Example-only deps (Silero pulls onnxruntime; keep it out of the test env).
 example = [
-    "pipecat-ai[silero]>=1.7,<2",
+    "pipecat-ai[silero,deepgram]>=1.7,<2",
     "python-dotenv>=1.0",
 ]
 
