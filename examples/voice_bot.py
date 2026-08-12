@@ -1,12 +1,12 @@
 """Native showcase bot: answers an inbound call and runs a real
-Deepgram STT -> Gemini LLM -> Cartesia TTS cascade. This is the pasted-quickstart
+Deepgram STT -> Gemini LLM -> Deepgram TTS cascade (two vendor keys total). This is the pasted-quickstart
 example — house style matches Pipecat's own transport examples (custom
 main(), native event names, direct construction), no adapter-specific
 plumbing beyond the transport.
 
 Env (from the shell or examples/.env — see examples/.env.example):
 AGENTDUET_API_KEY, AGENTDUET_CONNECTOR_UUID, optional AGENTDUET_BASE_URL,
-DEEPGRAM_API_KEY, GOOGLE_API_KEY, CARTESIA_API_KEY, optional CARTESIA_VOICE_ID.
+DEEPGRAM_API_KEY (STT and TTS), GOOGLE_API_KEY, optional DEEPGRAM_TTS_VOICE.
 Run:  uv run --group example python examples/voice_bot.py
 Then call the connector's number. The bot greets you first, then converses.
 """
@@ -35,8 +35,8 @@ from pipecat.pipeline.worker import PipelineWorker
 from pipecat.processors.aggregators.llm_context import LLMContext
 from pipecat.processors.aggregators.llm_response_universal import LLMContextAggregatorPair
 from pipecat.processors.audio.vad_processor import VADProcessor
-from pipecat.services.cartesia.tts import CartesiaTTSService
 from pipecat.services.deepgram.stt import DeepgramSTTService
+from pipecat.services.deepgram.tts import DeepgramTTSService
 from pipecat.services.google.llm import GoogleLLMService
 from pipecat.turns.user_turn_processor import UserTurnProcessor
 from pipecat.workers.runner import WorkerRunner
@@ -49,8 +49,6 @@ logger = logging.getLogger("voice_bot")
 SAMPLE_RATE = 16000  # Silero VAD supports 8k/16k only; 16k is the default
 
 # Arbitrary default (British Reading Lady) — not vetted for quality, just a
-# real Cartesia voice id so the example runs with CARTESIA_VOICE_ID unset.
-DEFAULT_CARTESIA_VOICE_ID = "71a7ad14-091c-4e8e-a314-022ece01c121"
 
 _call_tasks: set[asyncio.Task] = set()
 
@@ -68,8 +66,7 @@ async def run_call(
     *,
     deepgram_api_key: str,
     google_api_key: str,
-    cartesia_api_key: str,
-    cartesia_voice_id: str,
+    tts_voice: str | None,
 ):
     session = await sm.open_session(uuid.uuid4().hex, noti.subscriber)
     call = await session.process_call(noti)
@@ -90,7 +87,7 @@ async def run_call(
 
     stt = DeepgramSTTService(api_key=deepgram_api_key)
     llm = GoogleLLMService(api_key=google_api_key)  # default model: gemini-2.5-flash
-    tts = CartesiaTTSService(api_key=cartesia_api_key, voice_id=cartesia_voice_id)
+    tts = DeepgramTTSService(api_key=deepgram_api_key, voice=tts_voice)
 
     pipeline = Pipeline(
         [
@@ -152,8 +149,8 @@ async def main():
     # deployment fails at startup, not silently on the first inbound call.
     deepgram_api_key = _require_env("DEEPGRAM_API_KEY")
     google_api_key = _require_env("GOOGLE_API_KEY")
-    cartesia_api_key = _require_env("CARTESIA_API_KEY")
-    cartesia_voice_id = os.getenv("CARTESIA_VOICE_ID", DEFAULT_CARTESIA_VOICE_ID)
+    # None -> the service default voice (aura-2-helena-en in pipecat 1.7.0).
+    tts_voice = os.getenv("DEEPGRAM_TTS_VOICE")
     config = SessionManagerConfig.create(
         api_key=api_key,
         connector_uuid=connector_uuid,
@@ -175,8 +172,7 @@ async def main():
                     noti,
                     deepgram_api_key=deepgram_api_key,
                     google_api_key=google_api_key,
-                    cartesia_api_key=cartesia_api_key,
-                    cartesia_voice_id=cartesia_voice_id,
+                    tts_voice=tts_voice,
                 )
             )
             _call_tasks.add(task)
