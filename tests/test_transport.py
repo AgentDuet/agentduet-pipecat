@@ -285,3 +285,15 @@ class TestDualHalfLifecycle:
         assert b"".join(call.sent_audio) == farewell
         # ...and the call still closed once both halves stopped.
         assert call.close_calls >= 1
+
+
+class TestRingTime:
+    def test_invalid_ring_time_raises_at_construction(self):
+        with pytest.raises(ValueError, match="ring_time_seconds"):
+            AgentDuetTransport(FakeCall.outbound(), ring_time_seconds=0)
+        with pytest.raises(ValueError, match="ring_time_seconds"):
+            AgentDuetTransport(FakeCall.outbound(), ring_time_seconds=121)
+
+    def test_ring_time_reaches_session(self):
+        transport = AgentDuetTransport(FakeCall.outbound(), ring_time_seconds=45)
+        assert transport._session._ring_time_seconds == 45
