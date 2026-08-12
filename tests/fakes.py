@@ -42,7 +42,10 @@ class FakeCall:
         self.caller = FakeParty(caller_value)
         self.callee = FakeParty(callee_value)
         self.audio_config = CallAudioConfig(sample_rate=sample_rate)
-        self.state = CallState.RINGING
+        # Real Call.__init__ sets NEW unconditionally; process_call never
+        # changes it. Direction is NOT observable from state — only from the
+        # caller/subscriber relationship.
+        self.state = CallState.NEW
 
         # Scripting knobs
         self.answer_result: CommandResult | Exception = CommandResult(success=True)
@@ -50,14 +53,38 @@ class FakeCall:
         self.send_audio_error: Exception | None = None
         self.clear_delay: float = 0.0
         self.clear_result = CommandResult(success=True, payload=0)
+        self.dial_result: CommandResult | Exception = CommandResult(success=True)
+        self.dial_gate: asyncio.Event | None = None  # dial() awaits this if set
 
         # Recorders
         self.sent_audio: list[bytes] = []
         self.answer_calls: int = 0
+        self.dial_calls: int = 0
+        self.dial_ring_time: int | None = None
         self.clear_calls: int = 0
         self.close_calls: int = 0
         self._hangup_handlers: list = []
         self._event_handlers: dict = {}
+
+    @classmethod
+    def outbound(
+        cls,
+        *,
+        subscriber: str = "+6511111111",
+        dest_value: str = "+6533333333",
+        sample_rate: int = 16000,
+    ) -> "FakeCall":
+        """An outbound-dial shell as Session.make_call mints it:
+        caller == subscriber, callee == participant == dest (state is NEW
+        for every call; direction lives in the caller/subscriber relation)."""
+        call = cls(
+            subscriber=subscriber,
+            caller_value=subscriber,
+            callee_value=dest_value,
+            sample_rate=sample_rate,
+        )
+        call.participant = Address(Network.TELCO, dest_value)
+        return call
 
     # -- registration ------------------------------------------------------
     def on_hangup(self, func):
@@ -85,6 +112,26 @@ class FakeCall:
         if self.answer_result.success:
             self.state = CallState.LIVE
         return self.answer_result
+
+    async def dial(self, *, ring_time_seconds: int = 60) -> CommandResult:
+        self.dial_calls += 1
+        self.dial_ring_time = ring_time_seconds
+        if self.dial_gate is not None:
+            await self.dial_gate.wait()
+        if self.state == CallState.TERMINATED and not isinstance(
+            self.dial_result, Exception
+        ):
+            raise CallClosedError()
+        if isinstance(self.dial_result, Exception):
+            raise self.dial_result
+        if self.dial_result.success:
+            self.state = CallState.LIVE
+        else:
+            # Real dial() force-closes the voice WS on CALL_UNANSWERED/TIMEOUT,
+            # and the voice layer synthesizes a HANGUP that fires handlers.
+            # Modeled as hangup-before-return (the tighter ordering).
+            await self.trigger_hangup()
+        return self.dial_result
 
     async def send_audio(self, audio: bytes) -> None:
         if self.state == CallState.TERMINATED:
