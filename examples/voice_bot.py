@@ -1,12 +1,12 @@
 """Native showcase bot: answers an inbound call and runs a real
-Deepgram STT -> OpenAI LLM -> Cartesia TTS cascade. This is the pasted-quickstart
+Deepgram STT -> Gemini LLM -> Cartesia TTS cascade. This is the pasted-quickstart
 example — house style matches Pipecat's own transport examples (custom
 main(), native event names, direct construction), no adapter-specific
 plumbing beyond the transport.
 
 Env (from the shell or examples/.env — see examples/.env.example):
 AGENTDUET_API_KEY, AGENTDUET_CONNECTOR_UUID, optional AGENTDUET_BASE_URL,
-DEEPGRAM_API_KEY, OPENAI_API_KEY, CARTESIA_API_KEY, optional CARTESIA_VOICE_ID.
+DEEPGRAM_API_KEY, GOOGLE_API_KEY, CARTESIA_API_KEY, optional CARTESIA_VOICE_ID.
 Run:  uv run --group example python examples/voice_bot.py
 Then call the connector's number. The bot greets you first, then converses.
 """
@@ -37,7 +37,7 @@ from pipecat.processors.aggregators.llm_response_universal import LLMContextAggr
 from pipecat.processors.audio.vad_processor import VADProcessor
 from pipecat.services.cartesia.tts import CartesiaTTSService
 from pipecat.services.deepgram.stt import DeepgramSTTService
-from pipecat.services.openai.llm import OpenAILLMService
+from pipecat.services.google.llm import GoogleLLMService
 from pipecat.turns.user_turn_processor import UserTurnProcessor
 from pipecat.workers.runner import WorkerRunner
 
@@ -67,7 +67,7 @@ async def run_call(
     noti: IncomingCallNotification,
     *,
     deepgram_api_key: str,
-    openai_api_key: str,
+    google_api_key: str,
     cartesia_api_key: str,
     cartesia_voice_id: str,
 ):
@@ -89,7 +89,7 @@ async def run_call(
     aggregators = LLMContextAggregatorPair(context)
 
     stt = DeepgramSTTService(api_key=deepgram_api_key)
-    llm = OpenAILLMService(api_key=openai_api_key)
+    llm = GoogleLLMService(api_key=google_api_key)  # default model: gemini-2.5-flash
     tts = CartesiaTTSService(api_key=cartesia_api_key, voice_id=cartesia_voice_id)
 
     pipeline = Pipeline(
@@ -151,7 +151,7 @@ async def main():
     # Required up front (not lazily inside run_call) so a misconfigured
     # deployment fails at startup, not silently on the first inbound call.
     deepgram_api_key = _require_env("DEEPGRAM_API_KEY")
-    openai_api_key = _require_env("OPENAI_API_KEY")
+    google_api_key = _require_env("GOOGLE_API_KEY")
     cartesia_api_key = _require_env("CARTESIA_API_KEY")
     cartesia_voice_id = os.getenv("CARTESIA_VOICE_ID", DEFAULT_CARTESIA_VOICE_ID)
     config = SessionManagerConfig.create(
@@ -174,7 +174,7 @@ async def main():
                     sm,
                     noti,
                     deepgram_api_key=deepgram_api_key,
-                    openai_api_key=openai_api_key,
+                    google_api_key=google_api_key,
                     cartesia_api_key=cartesia_api_key,
                     cartesia_voice_id=cartesia_voice_id,
                 )
