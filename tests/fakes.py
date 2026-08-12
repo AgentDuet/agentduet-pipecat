@@ -103,9 +103,7 @@ class FakeCall:
         self.answer_calls += 1
         if self.answer_gate is not None:
             await self.answer_gate.wait()
-        if self.state == CallState.TERMINATED and not isinstance(
-            self.answer_result, Exception
-        ):
+        if self.state == CallState.TERMINATED and not isinstance(self.answer_result, Exception):
             raise CallClosedError()
         if isinstance(self.answer_result, Exception):
             raise self.answer_result
@@ -118,9 +116,7 @@ class FakeCall:
         self.dial_ring_time = ring_time_seconds
         if self.dial_gate is not None:
             await self.dial_gate.wait()
-        if self.state == CallState.TERMINATED and not isinstance(
-            self.dial_result, Exception
-        ):
+        if self.state == CallState.TERMINATED and not isinstance(self.dial_result, Exception):
             raise CallClosedError()
         if isinstance(self.dial_result, Exception):
             raise self.dial_result

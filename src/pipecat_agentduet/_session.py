@@ -1,4 +1,4 @@
-"""Call lifecycle for AgentDuetTransport: answer, teardown, event fan-out.
+"""Call lifecycle for AgentDuetTransport: answer/dial, teardown, event fan-out.
 
 One _AgentDuetSession per call, shared by the input and output transport
 halves. Every disconnect path funnels through _teardown() — the single
@@ -31,12 +31,12 @@ def _terminated_result() -> CommandResult:
     return CommandResult(
         success=False,
         error_code="CALL_TERMINATED",
-        error_message="Call terminated before or during answer",
+        error_message="Call terminated before or during answer/dial",
     )
 
 
 class _AgentDuetSession:
-    """Owns answer, the teardown latch, and event fan-out for one Call.
+    """Owns answer/dial, the teardown latch, and event fan-out for one Call.
 
     ``notifier`` is the AgentDuetTransport (duck-typed in tests): it provides
     ``_fire(event_name, payload)`` and ``_request_worker_cancel(reason)``.

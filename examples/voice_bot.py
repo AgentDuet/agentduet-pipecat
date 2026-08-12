@@ -135,7 +135,7 @@ async def run_call(
         logger.info("disconnected: %s (call %s)", payload.participant.value, payload.call_id)
 
     @transport.event_handler("on_dialin_error")
-    async def on_dial_error(t, result):
+    async def on_answer_error(t, result):
         logger.error("answer failed: %s (%s)", result.error_code, result.error_message)
 
     runner = WorkerRunner(handle_sigint=False)

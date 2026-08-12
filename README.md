@@ -10,7 +10,7 @@ Not on PyPI yet (publishing is pending a packaging decision); install from sourc
 pip install git+https://github.com/vonhutuan-b3/agentduet-pipecat.git
 ```
 
-Requires Python >= 3.12. The quickstart below also needs Pipecat's service extras: `pip install "pipecat-ai[silero,deepgram,openai,cartesia]"`.
+Requires Python >= 3.12. The quickstart below also needs Pipecat's service extras: `pip install "pipecat-ai[silero,deepgram]"`.
 
 ## Inbound quickstart
 
