@@ -490,10 +490,34 @@ two vendor keys), 1-minute inbound conversation:
   form (bot-initiated close draining the buffer) remains untested.
 - Clean teardown including both Deepgram websockets on remote hangup.
 
-### Still pending (Task 10 steps 4–5)
+### Farewell drain-on-close (Task 10 step 4) — RESOLVED, 2026-08-12
 
-- Farewell drain-on-close by ear, strong form: bot-initiated
-  `call.close()` right after queueing a goodbye (the spike's
-  carried-over open item). Needs a small temp bot variant.
-- WA follow-up path (`call_and_wa_followup.py`) — WA connector or
-  `WA_FOLLOWUP_TO` fallback.
+Strong form validated live: `voice_bot.py` ended the call from the bot
+side after the caller said goodbye (graceful EndFrame path → half-latch →
+`call.close()`), and the operator **heard the full farewell** ("Goodbye!
+Have a great day!") before the call dropped — no truncation. The spike's
+§3 open item closes with **no SDK drain-before-close needed** for
+conversational-length farewells: the EndFrame travels the pipeline behind
+the farewell audio, and the server pull drains what remains during the
+graceful stop. Caveat recorded: only a ~1.5 s farewell was tested; a
+multi-sentence farewell puts more residue in the client ring buffer at
+close time and could still truncate — re-check by ear if bots start
+delivering long sign-offs.
+
+This run also live-validated the **EndFrame teardown row** (matrix row 6,
+previously fake-only): self-initiated close, no `CancelWorkerFrame`,
+disconnect events once, process kept serving.
+
+First implementation lesson worth keeping: a goodbye *detector* placed
+after the output transport never fired, because the universal user
+aggregator consumes final `TranscriptionFrame`s and pushes nothing
+downstream. The shipped design avoids the issue entirely — the LLM
+decides, via a `hang_up` tool (`FunctionSchema` + `register_function`);
+the handler pushes `EndWorkerFrame` upstream, ordering the EndFrame
+behind the farewell audio by construction.
+
+### Still pending (Task 10 step 5)
+
+- WA follow-up path (`call_and_wa_followup.py`) — the operator's
+  connector takes WhatsApp calls, so the real WA-thread path is testable
+  directly (no `WA_FOLLOWUP_TO` fallback needed).
