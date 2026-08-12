@@ -26,6 +26,13 @@ flow even on a voice-only connector. To see the real thing — the follow-up
 landing in the same thread the caller would message the bot back on — you
 need a WA-capable connector (see Task 10).
 
+Known platform limitation (live-validated 2026-08-12): the send currently
+fails with inbox.NotFound because calling and WA messaging use different
+subscriber identities (the WA messaging subscriber is the business
+account's phone_number_id, not the call's subscriber). The same-session
+code below is the intended design and stays; it starts working once the
+platform merges the two identities.
+
 This example can't be fully validated end-to-end without a WA connector:
 SendWAMessage's `data` dict is passed through to the WhatsApp Cloud API by
 the connector, and its exact shape/behaviour is connector-dependent.

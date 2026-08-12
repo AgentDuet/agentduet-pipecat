@@ -520,8 +520,25 @@ live-validated under the tightest timing: Gemini emitted farewell text +
 started speaking*, and the farewell still played out fully — the
 frame-ordering guarantee, observed.
 
-### Still pending (Task 10 step 5)
+### Multi-modal / WA follow-up (Task 10 step 5) — 2026-08-12
 
-- WA follow-up path (`call_and_wa_followup.py`) — the operator's
-  connector takes WhatsApp calls, so the real WA-thread path is testable
-  directly (no `WA_FOLLOWUP_TO` fallback needed).
+- **Receive path fully validated**: WhatsApp voice call + WhatsApp
+  messages arriving through one process and one arrival layer.
+  `msg.payload` is the raw Cloud API webhook envelope (dig into
+  `entry[].changes[].value.messages[]`), and non-text types arrive too —
+  the first delivery observed was an `interactive` /
+  `call_permission_reply` (the WA calling-permission handshake), so apps
+  must filter by message `type`.
+- **Send path blocked by a platform-side identity split**: the follow-up
+  through the call's session fails with `inbox.NotFound` ("Whatsapp
+  number not found") because WA *messaging* keys the subscriber on the
+  business account's `phone_number_id` while the *call* session carries
+  the number identity (confirmed by the operator; the SDK's own
+  `wa_echo_bot` documents "subscriber is our BA phone_number_id").
+  Neither recipient format nor thread existence nor `api_version` was
+  the cause (all ruled out live). **Resolution deferred to the
+  platform: merge the two subscriber identities.** The example
+  deliberately keeps the same-session send — it is the intended design
+  and starts working when the identities merge; a workaround (second
+  session under the messaging subscriber) was prototyped and discarded
+  by that decision.
