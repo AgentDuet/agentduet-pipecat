@@ -43,6 +43,7 @@ import uuid
 
 from _tone import ToneBot
 from agentduet import (
+    AgentDuetError,
     CallAudioConfig,
     IncomingCallNotification,
     IncomingMessage,
@@ -79,7 +80,8 @@ def _require_env(name: str) -> str:
 
 
 async def run_call(sm: SessionManager, noti: IncomingCallNotification):
-    session = await sm.open_session(uuid.uuid4().hex, noti.subscriber)
+    session_id = uuid.uuid4().hex
+    session = await sm.open_session(session_id, noti.subscriber)
     call = await session.process_call(noti)
     transport = AgentDuetTransport(call)
 
@@ -131,22 +133,30 @@ async def run_call(sm: SessionManager, noti: IncomingCallNotification):
     elif wa_followup_to:
         destination = wa_followup_to
     else:
-        logger.debug("no WA follow-up: caller is not on WA and WA_FOLLOWUP_TO is unset")
+        logger.info("no WA follow-up: caller is not on WA and WA_FOLLOWUP_TO is unset")
         return
 
-    result = await session.send_message(
-        SendWAMessage(
-            api_version=os.getenv("WA_API_VERSION", "v21.0"),
-            data={
-                "messaging_product": "whatsapp",
-                "to": destination,
-                "type": "text",
-                "text": {"body": "Thanks for calling! Reply here any time."},
-            },
+    try:
+        result = await session.send_message(
+            SendWAMessage(
+                api_version=os.getenv("WA_API_VERSION", "v21.0"),
+                data={
+                    "messaging_product": "whatsapp",
+                    "to": destination,
+                    "type": "text",
+                    "text": {"body": "Thanks for calling! Reply here any time."},
+                },
+            )
         )
-    )
-    if not result.success:
-        logger.warning("WA follow-up failed: %s", result.error_code)
+        if result.success:
+            logger.info("WA follow-up sent to %s in session %s", destination, session_id)
+        else:
+            logger.warning("WA follow-up failed: %s %s", result.error_code, result.error_content)
+    except AgentDuetError as exc:
+        # send_message can raise (e.g. RequestTimeoutError, TransportError per
+        # the SDK docs); without this, a transient send failure would surface
+        # as "call handler crashed" even though the call itself succeeded.
+        logger.warning("WA follow-up failed: %s", exc)
 
 
 async def main():
