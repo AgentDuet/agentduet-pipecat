@@ -3,10 +3,8 @@ name = "pipecat-agentduet"
 version = "0.1.0.dev0"
 description = "AgentDuet transport for Pipecat: phone/WhatsApp calls in any Pipecat pipeline"
 requires-python = ">=3.12"
-# The agentduet floor names a pre-release on purpose: a specifier that itself
-# carries one permits pre-releases of that package.
 dependencies = [
-    "agentduet>=1.0.0b10,<2",
+    "agentduet>=1.0.0,<2",
     "pipecat-ai>=1.7,<2",
 ]
 

@@ -22,16 +22,16 @@ wheels = [
 
 [[package]]
 name = "agentduet"
-version = "1.0.0b10"
+version = "1.0.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "abxbus" },
     { name = "httpx" },
     { name = "websockets" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/1d/78/1c2dfb274a849dbf1c4ede735a3269687e871f38524583998fde30dbd0d4/agentduet-1.0.0b10.tar.gz", hash = "sha256:aa85e64c7ae51b847933b8ee63521d81ce33dfb896b7ff028f5585a5c428208e", size = 81026, upload-time = "2026-07-30T10:35:26.826Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/7a/0e/091e52fba6caf7a6b6b533c0238c1b3852b95b9acc049946ccf6c1e4ad71/agentduet-1.0.0.tar.gz", hash = "sha256:5e6d3fb33d1bcf278595ff57ecc0e5e521e0bbdd04e1125bf18743eaa0d2bc99", size = 81459, upload-time = "2026-08-10T12:17:53.554Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/a5/cc/37ca62e7387ca9e5e7abfdecd043f3025b012cb706ab4cc0bd2721667af8/agentduet-1.0.0b10-py3-none-any.whl", hash = "sha256:6fea85a42bb2c5074639d27f60afc8947f6ae93f7e72b0bd7a493563a8355b08", size = 77892, upload-time = "2026-07-30T10:35:25.347Z" },
+    { url = "https://files.pythonhosted.org/packages/6a/77/817a244591195340d18e6f8fbca968c087a6e4ffa6bb34066bd000c172b1/agentduet-1.0.0-py3-none-any.whl", hash = "sha256:9f2ad897ce8228d3fdc35559e386e783d03bfd7ae0c26e0adf4c8e23e2b33da8", size = 78094, upload-time = "2026-08-10T12:17:51.154Z" },
 ]
 
 [[package]]
@@ -970,7 +970,7 @@ example = [
 
 [package.metadata]
 requires-dist = [
-    { name = "agentduet", specifier = ">=1.0.0b10,<2" },
+    { name = "agentduet", specifier = ">=1.0.0,<2" },
     { name = "pipecat-ai", specifier = ">=1.7,<2" },
 ]
 
