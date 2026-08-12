@@ -11,7 +11,7 @@ point, not the AI stack.
 
 Env (from the shell or examples/.env — see examples/.env.example):
   AGENTDUET_API_KEY, AGENTDUET_CONNECTOR_UUID, optional AGENTDUET_BASE_URL.
-  Optional: WA_API_VERSION (defaults to "v21.0"), WA_FOLLOWUP_TO.
+  Optional: WA_API_VERSION (defaults to "v23.0"), WA_FOLLOWUP_TO.
 
 Run:  uv run --group example python examples/call_and_wa_followup.py
 Then call the connector's number. Speak; after you stop, a tone plays for up
@@ -143,7 +143,7 @@ async def run_call(sm: SessionManager, noti: IncomingCallNotification):
     try:
         result = await session.send_message(
             SendWAMessage(
-                api_version=os.getenv("WA_API_VERSION", "v21.0"),
+                api_version=os.getenv("WA_API_VERSION", "v23.0"),
                 data={
                     "messaging_product": "whatsapp",
                     "to": destination,
@@ -179,10 +179,27 @@ async def main():
         async def on_message(msg: IncomingMessage):
             # Incoming messages can be redelivered by the SDK; a production
             # app should dedup by msg.id before acting on one twice.
-            logger.info("message from %s: %s", msg.participant.value, msg.payload)
+            # subscriber logged deliberately: for WA messaging it is the BA
+            # phone_number_id (per the SDK's wa_echo_bot), which may differ
+            # from the CALL notification's subscriber identity.
+            logger.info(
+                "message from %s (subscriber %s): %s",
+                msg.participant.value,
+                msg.subscriber,
+                msg.payload,
+            )
 
         @sm.on_incoming_call
         async def on_call(noti: IncomingCallNotification):
+            # subscriber logged deliberately — compare with the message
+            # handler's subscriber to see whether calling and messaging use
+            # the same identity on this connector.
+            logger.info(
+                "call from %s (network %s, subscriber %s)",
+                noti.participant.value,
+                noti.network,
+                noti.subscriber,
+            )
             # Own task: never block the SDK event bus for the call's duration.
             # Tracked (not fire-and-forget): a bare create_task() holds no
             # reference (GC risk) and swallows exceptions until GC logs
