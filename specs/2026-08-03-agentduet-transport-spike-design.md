@@ -389,3 +389,156 @@ Conclusions:
 
 - Ring-buffer drain-on-close (§3 open item): does a farewell fully play
   out when the bot ends the call? Not yet checked by ear. Deferred to v1.
+
+## v1 results (live validation, 2026-08-12)
+
+Setup: 16 kHz connector, remote party +8497… dialing in over **both
+TELCO and WhatsApp across the runs** (mixed, per the operator; the
+outbound dials were explicitly `Network.TELCO`). Keyless tone pipelines
+plus the showcase bot from the v1 branch, pipecat-ai 1.7.0, agentduet
+1.0.0 stable. Same measurement conventions as the spike results.
+Incidental but valuable: some inbound runs — including the showcase
+conversation — arrived as **WhatsApp voice calls**, so voice-over-WA
+through the identical transport code is live-validated; the pipeline is
+network-agnostic by design and nothing needed to change.
+
+### Inbound (v1 refactored answer path, plan Task 10 step 3 — tone bot only)
+
+- Full lifecycle re-validated through the refactored `_establish()` path:
+  connect/disconnect alias events once each, ~25 turns over a 2.6-minute
+  call, remote hangup → clean teardown.
+- **Barge-in ack: 34–46 ms** (n≈25), tighter than the spike's 47–72 ms.
+  The interrupt command leaves within ~3 ms of the VAD event on every
+  sample — the transport-side latency is constant.
+- **Perceived barge-in latency variance root-caused to VAD onset, not
+  the transport.** With pipecat defaults (`confidence=0.7`,
+  `start_secs=0.2`, `min_volume=0.6`), a soft or gradual speech onset
+  hovers around the thresholds and detection can take 0.5–1 s+, while a
+  sharp onset trips in ~0.3–0.4 s. Demo tuning knobs (`start_secs`,
+  `min_volume` on the VAD params) trade snappiness for false triggers;
+  documented as pipeline tuning, not transport behavior.
+- **One unresolved intermittent: a mid-call inbound-media stall.** On one
+  call, inbound audio stopped reaching the pipeline ~50 s in (no VAD
+  events for 36 s) while the same websocket stayed healthy in both the
+  control direction (interrupt acks unchanged) and the outbound media
+  direction, and delivered the eventual hangup instantly — ruling out a
+  client-side WS/receive-loop stall. Not reproduced on an instrumented
+  2.6-minute follow-up call (rock-steady 32 000 B/s inbound; line-silence
+  floor measures peak≈13). Upstream of the SDK client: either the server
+  stopped forwarding caller media or the carrier stopped delivering RTP.
+  Discriminators for recurrence (`examples/_audio_meter.py`, wire per its docstring): 0 B/s ⇒
+  server stopped forwarding; ~32 000 B/s with peak≈0 while the caller
+  speaks ⇒ carrier one-way audio.
+
+### Outbound (plan Task 10 steps 1–2 — the never-live-tested v1 path)
+
+1. **Answered.** Dial spawned at pipeline start; resolved answered after
+   ~10 s of ring. `on_dialout_answered` + generic `on_client_connected`
+   fired once each; tone + barge-in on the callee track healthy (acks
+   46–48 ms, clears 0–94 KB depending on interrupt position); remote
+   hangup → `CancelWorkerFrame(reason: remote hangup)` → clean worker
+   exit and SessionManager disconnect.
+2. **Unanswered.** Resolved at exactly `ring_time_seconds` (45.3 s
+   observed for 45) with `error_code=TIMEOUT` — the client-side deadline;
+   this route never reported `CALL_UNANSWERED`. **Which code surfaces is
+   route/carrier-dependent** — apps must treat
+   `{CALL_UNANSWERED, TIMEOUT}` as one "nobody picked up" outcome family,
+   never branch on one of them. No connected/disconnected events;
+   `on_dialout_error` once; clean teardown.
+   **Live cancel-reason ordering settled:** the SDK's force-close on a
+   falsy dial fires the synthesized hangup ~1 ms *before* `dial()`
+   returns, so the worker cancel carries `reason: remote hangup` and the
+   later "dial failed" cancel is deduped. This is exactly the
+   hangup-before-return ordering `FakeCall.dial()` models — live behavior
+   matches the test double.
+3. **Rejected while ringing.** On this route, indistinguishable from
+   unanswered: `TIMEOUT` after the full 45 s. The decline never reached
+   the SDK as a distinct signal (undetermined whether the carrier
+   swallowed it or the server didn't map it — server logs for the call
+   would split that). **Carrier-dependent by nature**: a route that does
+   propagate the reject would presumably resolve fast with
+   `CALL_UNANSWERED` — apps and docs must be prepared for both shapes
+   (fast server-reported failure *or* full-ring-time timeout).
+   **Confirms parent spec §10 gap 2 (dial progress) with live data**:
+   on routes like this one, a rejected outbound call burns the full
+   `ring_time_seconds` before the pipeline is reclaimed. Transport
+   behavior is per spec on every observable; the fix is a protocol
+   addition, not transport code.
+
+### Showcase bot live (Task 10 step 3) — 2026-08-12
+
+`voice_bot.py` (Deepgram STT → Gemini 3.5 Flash-Lite → Deepgram Aura TTS,
+two vendor keys), 1-minute inbound conversation:
+
+- **Greeting-first worked**: `on_dialin_connected` → `LLMRunFrame` →
+  first TTS audio ~1.4 s after connect.
+- **Full multi-turn conversation with carried context** (weather in
+  Paris → "How about London?" resolved correctly from history).
+- **Voice-to-voice latency ~0.9 s** (user turn end → LLM first token
+  ~600 ms → bot speaking), Gemini 3.5 Flash-Lite.
+- **Real barge-in mid-reply**: user spoke while 58 880 B (1.84 s) of a
+  reply was still buffered — cleared, ack 37 ms. Note: with the
+  universal aggregator, an interruption produces *two* clear calls (the
+  aggregator and UserTurnProcessor both broadcast); harmless —
+  `clear_send_audio_buffer` is idempotent and both ack ~36 ms.
+- **Smart Turn v3 observed doing its job**: instant COMPLETE verdicts on
+  clear turn ends; one trailing "Okay. I bye." judged INCOMPLETE and
+  resolved by the 3 s stop-secs fallback — the exact behavior class the
+  keyless-pipeline gotcha documents, here working as designed.
+- Farewell data point (weak form): the bot's "Goodbye!" reply fully
+  played before the caller hung up 8 s later — no truncation. The strong
+  form (bot-initiated close draining the buffer) remains untested.
+- Clean teardown including both Deepgram websockets on remote hangup.
+
+### Farewell drain-on-close (Task 10 step 4) — RESOLVED, 2026-08-12
+
+Strong form validated live: `voice_bot.py` ended the call from the bot
+side after the caller said goodbye (graceful EndFrame path → half-latch →
+`call.close()`), and the operator **heard the full farewell** ("Goodbye!
+Have a great day!") before the call dropped — no truncation. The spike's
+§3 open item closes with **no SDK drain-before-close needed** for
+conversational-length farewells: the EndFrame travels the pipeline behind
+the farewell audio, and the server pull drains what remains during the
+graceful stop. Caveat recorded: only a ~1.5 s farewell was tested; a
+multi-sentence farewell puts more residue in the client ring buffer at
+close time and could still truncate — re-check by ear if bots start
+delivering long sign-offs.
+
+This run also live-validated the **EndFrame teardown row** (matrix row 6,
+previously fake-only): self-initiated close, no `CancelWorkerFrame`,
+disconnect events once, process kept serving.
+
+First implementation lesson worth keeping: a goodbye *detector* placed
+after the output transport never fired, because the universal user
+aggregator consumes final `TranscriptionFrame`s and pushes nothing
+downstream. The shipped design avoids the issue entirely — the LLM
+decides, via a `hang_up` tool (`FunctionSchema` + `register_function`);
+the handler pushes `EndWorkerFrame` upstream, ordering the EndFrame
+behind the farewell audio by construction. The tool path was then itself
+live-validated under the tightest timing: Gemini emitted farewell text +
+`hang_up` in one completion, the EndFrame was queued *before the bot even
+started speaking*, and the farewell still played out fully — the
+frame-ordering guarantee, observed.
+
+### Multi-modal / WA follow-up (Task 10 step 5) — 2026-08-12
+
+- **Receive path fully validated**: WhatsApp voice call + WhatsApp
+  messages arriving through one process and one arrival layer.
+  `msg.payload` is the raw Cloud API webhook envelope (dig into
+  `entry[].changes[].value.messages[]`), and non-text types arrive too —
+  the first delivery observed was an `interactive` /
+  `call_permission_reply` (the WA calling-permission handshake), so apps
+  must filter by message `type`.
+- **Send path blocked by a platform-side identity split**: the follow-up
+  through the call's session fails with `inbox.NotFound` ("Whatsapp
+  number not found") because WA *messaging* keys the subscriber on the
+  business account's `phone_number_id` while the *call* session carries
+  the number identity (confirmed by the operator; the SDK's own
+  `wa_echo_bot` documents "subscriber is our BA phone_number_id").
+  Neither recipient format nor thread existence nor `api_version` was
+  the cause (all ruled out live). **Resolution deferred to the
+  platform: merge the two subscriber identities.** The example
+  deliberately keeps the same-session send — it is the intended design
+  and starts working when the identities merge; a workaround (second
+  session under the messaging subscriber) was prototyped and discarded
+  by that decision.

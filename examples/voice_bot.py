@@ -1,14 +1,17 @@
 """Native showcase bot: answers an inbound call and runs a real
-Deepgram STT -> OpenAI LLM -> Cartesia TTS cascade. This is the pasted-quickstart
+Deepgram STT -> Gemini LLM -> Deepgram TTS cascade (two vendor keys total). This is the pasted-quickstart
 example — house style matches Pipecat's own transport examples (custom
 main(), native event names, direct construction), no adapter-specific
 plumbing beyond the transport.
 
 Env (from the shell or examples/.env — see examples/.env.example):
 AGENTDUET_API_KEY, AGENTDUET_CONNECTOR_UUID, optional AGENTDUET_BASE_URL,
-DEEPGRAM_API_KEY, OPENAI_API_KEY, CARTESIA_API_KEY, optional CARTESIA_VOICE_ID.
+DEEPGRAM_API_KEY (STT and TTS), GOOGLE_API_KEY, optional DEEPGRAM_TTS_VOICE.
 Run:  uv run --group example python examples/voice_bot.py
 Then call the connector's number. The bot greets you first, then converses.
+When you say you're done, the LLM says a farewell and calls its hang_up
+tool: the pipeline ends gracefully and the transport closes the call — the
+"pipeline done means call ends" contract, with the LLM deciding when.
 """
 
 import os
@@ -28,16 +31,24 @@ from agentduet import (
     SessionManagerConfig,
 )
 from dotenv import load_dotenv
+from pipecat.adapters.schemas.function_schema import FunctionSchema
+from pipecat.adapters.schemas.tools_schema import ToolsSchema
 from pipecat.audio.vad.silero import SileroVADAnalyzer
-from pipecat.frames.frames import LLMRunFrame
+from pipecat.frames.frames import (
+    EndWorkerFrame,
+    FunctionCallResultProperties,
+    LLMRunFrame,
+)
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.worker import PipelineWorker
 from pipecat.processors.aggregators.llm_context import LLMContext
 from pipecat.processors.aggregators.llm_response_universal import LLMContextAggregatorPair
 from pipecat.processors.audio.vad_processor import VADProcessor
-from pipecat.services.cartesia.tts import CartesiaTTSService
+from pipecat.processors.frame_processor import FrameDirection
 from pipecat.services.deepgram.stt import DeepgramSTTService
-from pipecat.services.openai.llm import OpenAILLMService
+from pipecat.services.deepgram.tts import DeepgramTTSService
+from pipecat.services.google.llm import GoogleLLMService
+from pipecat.services.llm_service import FunctionCallParams
 from pipecat.turns.user_turn_processor import UserTurnProcessor
 from pipecat.workers.runner import WorkerRunner
 
@@ -47,10 +58,6 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 logger = logging.getLogger("voice_bot")
 
 SAMPLE_RATE = 16000  # Silero VAD supports 8k/16k only; 16k is the default
-
-# Arbitrary default (British Reading Lady) — not vetted for quality, just a
-# real Cartesia voice id so the example runs with CARTESIA_VOICE_ID unset.
-DEFAULT_CARTESIA_VOICE_ID = "71a7ad14-091c-4e8e-a314-022ece01c121"
 
 _call_tasks: set[asyncio.Task] = set()
 
@@ -67,13 +74,26 @@ async def run_call(
     noti: IncomingCallNotification,
     *,
     deepgram_api_key: str,
-    openai_api_key: str,
-    cartesia_api_key: str,
-    cartesia_voice_id: str,
+    google_api_key: str,
+    tts_voice: str | None,
 ):
     session = await sm.open_session(uuid.uuid4().hex, noti.subscriber)
     call = await session.process_call(noti)
     transport = AgentDuetTransport(call)
+
+    # The LLM decides when to end the call, via a tool. Instructed to speak
+    # the farewell BEFORE calling hang_up: the farewell audio is then already
+    # in flight ahead of the EndFrame the handler triggers, so it plays out
+    # fully before the transport closes the call (live-validated ordering).
+    hang_up = FunctionSchema(
+        name="hang_up",
+        description=(
+            "End the phone call. Call this after you have said goodbye, when "
+            "the caller indicates the conversation is over."
+        ),
+        properties={},
+        required=[],
+    )
 
     context = LLMContext(
         [
@@ -81,16 +101,37 @@ async def run_call(
                 "role": "system",
                 "content": (
                     "You are a helpful assistant on a phone call. Keep answers to "
-                    "one or two sentences."
+                    "one or two sentences. When the caller wants to end the "
+                    "conversation, say a brief goodbye and then call the hang_up "
+                    "function."
                 ),
             }
-        ]
+        ],
+        tools=ToolsSchema(standard_tools=[hang_up]),
     )
     aggregators = LLMContextAggregatorPair(context)
 
     stt = DeepgramSTTService(api_key=deepgram_api_key)
-    llm = OpenAILLMService(api_key=openai_api_key)
-    tts = CartesiaTTSService(api_key=cartesia_api_key, voice_id=cartesia_voice_id)
+    llm = GoogleLLMService(
+        api_key=google_api_key,
+        settings=GoogleLLMService.Settings(model="gemini-3.5-flash-lite"),
+    )
+    tts = DeepgramTTSService(api_key=deepgram_api_key, voice=tts_voice)
+
+    async def _hang_up(params: FunctionCallParams):
+        logger.info("hang_up tool called; pipeline ends after the farewell")
+        # EndWorkerFrame -> worker -> EndFrame, which traverses the pipeline
+        # BEHIND the farewell audio already streaming through TTS, so the
+        # goodbye finishes before both halves stop and the transport closes
+        # the call ("pipeline done means call ends" — no lifecycle code).
+        await params.llm.push_frame(EndWorkerFrame(), FrameDirection.UPSTREAM)
+        # run_llm=False: no post-tool LLM turn — the pipeline is ending.
+        await params.result_callback(
+            {"status": "call ending"},
+            properties=FunctionCallResultProperties(run_llm=False),
+        )
+
+    llm.register_function("hang_up", _hang_up)
 
     pipeline = Pipeline(
         [
@@ -151,9 +192,9 @@ async def main():
     # Required up front (not lazily inside run_call) so a misconfigured
     # deployment fails at startup, not silently on the first inbound call.
     deepgram_api_key = _require_env("DEEPGRAM_API_KEY")
-    openai_api_key = _require_env("OPENAI_API_KEY")
-    cartesia_api_key = _require_env("CARTESIA_API_KEY")
-    cartesia_voice_id = os.getenv("CARTESIA_VOICE_ID", DEFAULT_CARTESIA_VOICE_ID)
+    google_api_key = _require_env("GOOGLE_API_KEY")
+    # None -> the service default voice (aura-2-helena-en in pipecat 1.7.0).
+    tts_voice = os.getenv("DEEPGRAM_TTS_VOICE")
     config = SessionManagerConfig.create(
         api_key=api_key,
         connector_uuid=connector_uuid,
@@ -174,9 +215,8 @@ async def main():
                     sm,
                     noti,
                     deepgram_api_key=deepgram_api_key,
-                    openai_api_key=openai_api_key,
-                    cartesia_api_key=cartesia_api_key,
-                    cartesia_voice_id=cartesia_voice_id,
+                    google_api_key=google_api_key,
+                    tts_voice=tts_voice,
                 )
             )
             _call_tasks.add(task)

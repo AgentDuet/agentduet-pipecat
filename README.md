@@ -4,19 +4,19 @@ Phone and WhatsApp calls in any [Pipecat](https://github.com/pipecat-ai/pipecat)
 
 ## Install
 
-Not on PyPI yet (publishing is pending a packaging decision); install from source for now. The repo location may change before publishing.
+Not on PyPI yet (publishing is pending a packaging decision); install from source for now. 
 
 ```sh
-pip install git+https://github.com/vonhutuan-b3/agentduet-pipecat.git
+pip install git+https://github.com/AgentDuet/agentduet-pipecat.git
 ```
 
-Requires Python >= 3.12. The quickstart below also needs Pipecat's service extras: `pip install "pipecat-ai[silero,deepgram]"`.
+Requires Python >= 3.12. The quickstart below also needs Pipecat's service extras: `pip install "pipecat-ai[silero,deepgram,google]"`.
 
 ## Inbound quickstart
 
 A *connector* is a provisioned phone/WhatsApp number (or number pool) on the AgentDuet platform; your bot process attaches to one and receives its calls. The API key and connector UUID come from your AgentDuet workspace/portal.
 
-A complete bot: answers calls on your connector, greets the caller, and runs a Deepgram → OpenAI → Cartesia cascade. Save as `bot.py`, set `AGENTDUET_API_KEY`, `AGENTDUET_CONNECTOR_UUID`, `DEEPGRAM_API_KEY`, `OPENAI_API_KEY`, and `CARTESIA_API_KEY`, run `python bot.py`, then call your connector's number.
+A complete bot: answers calls on your connector, greets the caller, and runs a Deepgram → Gemini → Deepgram cascade (STT and TTS on one Deepgram key — two vendor keys total). Save as `bot.py`, set `AGENTDUET_API_KEY`, `AGENTDUET_CONNECTOR_UUID`, `DEEPGRAM_API_KEY`, and `GOOGLE_API_KEY`, run `python bot.py`, then call your connector's number.
 
 ```python
 import os
@@ -34,9 +34,9 @@ from pipecat.pipeline.worker import PipelineWorker
 from pipecat.processors.aggregators.llm_context import LLMContext
 from pipecat.processors.aggregators.llm_response_universal import LLMContextAggregatorPair
 from pipecat.processors.audio.vad_processor import VADProcessor
-from pipecat.services.cartesia.tts import CartesiaTTSService
 from pipecat.services.deepgram.stt import DeepgramSTTService
-from pipecat.services.openai.llm import OpenAILLMService
+from pipecat.services.deepgram.tts import DeepgramTTSService
+from pipecat.services.google.llm import GoogleLLMService
 from pipecat.turns.user_turn_processor import UserTurnProcessor
 from pipecat.workers.runner import WorkerRunner
 
@@ -55,8 +55,8 @@ async def run_call(sm: SessionManager, noti: IncomingCallNotification):
         UserTurnProcessor(),
         DeepgramSTTService(api_key=os.environ["DEEPGRAM_API_KEY"]),
         aggregators.user(),
-        OpenAILLMService(api_key=os.environ["OPENAI_API_KEY"]),
-        CartesiaTTSService(api_key=os.environ["CARTESIA_API_KEY"], voice_id="71a7ad14-091c-4e8e-a314-022ece01c121"),
+        GoogleLLMService(api_key=os.environ["GOOGLE_API_KEY"], settings=GoogleLLMService.Settings(model="gemini-3.5-flash-lite")),
+        DeepgramTTSService(api_key=os.environ["DEEPGRAM_API_KEY"]),  # default voice: aura-2-helena-en
         transport.output(),
         aggregators.assistant(),
     ])
@@ -155,7 +155,8 @@ Audio is mono 16-bit PCM at the connector's fixed rate — 8000, 16000, or 24000
 ## Gotchas
 
 - **Keyless / no-STT pipelines must pin the turn-stop strategy.** Pipecat's default user-turn stop strategy is the Smart Turn v3 semantic model, which needs a transcript to judge; with no STT it judges phrases as incomplete turns and stalls the bot's reply 5–15 s until the stop timeout (observed on live validation). Pin `UserTurnProcessor(user_turn_strategies=UserTurnStrategies(stop=[SpeechTimeoutUserTurnStopStrategy(wait_for_transcript=False)]))` as the tone-bot examples do (`from pipecat.turns.user_stop import SpeechTimeoutUserTurnStopStrategy`, `from pipecat.turns.user_turn_strategies import UserTurnStrategies`). Real STT pipelines keep the default.
-- **A caller who abandons during ring can occupy a pipeline for ~10 s.** If the caller hangs up before the server has SIP dialog state for the call, the hangup has nothing to land against and the server never learns the call ended; the SDK's 10 s command timeout is the designed fallback that reclaims the pipeline. Expected behavior (root-caused with server logs), not a defect — no connected/disconnected events fire for such calls.
+- **A caller who abandons during ring can occupy a pipeline for ~10 s (inbound).** If the caller hangs up before the server has SIP dialog state for the call, the hangup has nothing to land against and the server never learns the call ended; the SDK's 10 s command timeout is the designed fallback that reclaims the pipeline. Expected behavior (root-caused with server logs), not a defect — no connected/disconnected events fire for such calls.
+- **Outbound dial failures: handle `CALL_UNANSWERED` and `TIMEOUT` as one outcome.** Which code you get is route/carrier-dependent — some routes report failures, others just let the client-side ring deadline expire. In particular, a callee who *rejects* the call may be indistinguishable from one who never answered (live-validated: on some carriers the decline never propagates, and the dial resolves as `TIMEOUT` after the full `ring_time_seconds`). Branch on `result.success`, log the code, and never write logic that assumes a reject resolves early. Distinguishing busy/no-answer/rejected needs a dial-progress protocol addition (parent spec §10) — not available in v1.
 
 ## Scaling
 
@@ -175,6 +176,6 @@ In-repo examples read credentials from `examples/.env` (see `examples/.env.examp
 |---|---|---|
 | `examples/inbound_tone_bot.py` | keyless inbound smoke test (barge-in measurement) | none |
 | `examples/outbound_tone_bot.py` | keyless outbound dial demo | none |
-| `examples/voice_bot.py` | full STT/LLM/TTS quickstart bot | Deepgram, OpenAI, Cartesia |
+| `examples/voice_bot.py` | full STT/LLM/TTS quickstart bot | Deepgram (STT+TTS), Google (Gemini) |
 | `examples/call_and_wa_followup.py` | voice call + WhatsApp follow-up in one session | none |
 | `examples/outbound_track_probe.py` | diagnostic: which track carries the remote party's audio | none |
