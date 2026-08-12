@@ -287,6 +287,104 @@ class TestDualHalfLifecycle:
         assert call.close_calls >= 1
 
 
+class TestOutboundPipeline:
+    async def test_dialout_alias_pair_fires_once_with_same_payload(self):
+        call = FakeCall.outbound()
+        call.dial_gate = asyncio.Event()
+        transport = AgentDuetTransport(call)
+        seen: list[tuple[str, object]] = []
+
+        @transport.event_handler("on_dialout_answered")
+        async def on_native(t, payload):
+            seen.append(("native", payload))
+
+        @transport.event_handler("on_client_connected")
+        async def on_generic(t, payload):
+            seen.append(("generic", payload))
+
+        worker = make_worker(Pipeline([transport.input(), FrameCapture()]))
+        run_task = await run_worker(worker)
+        await asyncio.sleep(0.1)  # dial spawned, gated on dial_gate
+
+        call.dial_gate.set()
+        await asyncio.wait_for(transport._session._establish_task, timeout=1.0)
+
+        assert [name for name, _ in seen] == ["native", "generic"]
+        assert seen[0][1] is seen[1][1]  # identical payload object
+
+        await call.trigger_hangup()
+        await asyncio.wait_for(run_task, timeout=5)
+
+    async def test_outbound_audio_flows_after_answer(self):
+        call = FakeCall.outbound(sample_rate=16000)
+        call.dial_gate = asyncio.Event()
+        transport = AgentDuetTransport(
+            call,
+            params=TransportParams(
+                audio_in_enabled=True,
+                audio_out_enabled=True,
+                audio_out_10ms_chunks=1,  # flush every 10 ms chunk
+            ),
+        )
+        capture = FrameCapture()
+        worker = make_worker(Pipeline([transport.input(), capture, transport.output()]))
+        run_task = await run_worker(worker)
+        await asyncio.sleep(0.1)  # dial spawned, gated on dial_gate
+
+        call.dial_gate.set()
+        await asyncio.wait_for(transport._session._establish_task, timeout=1.0)
+
+        call.callee.audio_queue.put_nowait(b"\x01\x02" * 80)
+        await asyncio.sleep(0.2)
+
+        audio = [f for f in capture.frames if isinstance(f, InputAudioRawFrame)]
+        assert audio, "no InputAudioRawFrame reached the pipeline"
+        assert audio[0].audio == b"\x01\x02" * 80  # bytes untouched
+        assert audio[0].sample_rate == 16000  # tagged with the call's rate
+        assert audio[0].num_channels == 1
+
+        pcm = b"\x03\x04" * (CHUNK // 2)  # exactly one chunk
+        await worker.queue_frame(make_output_frame(pcm))
+        await asyncio.sleep(0.3)
+        assert b"".join(call.sent_audio) == pcm
+
+        await call.trigger_hangup()
+        await asyncio.wait_for(run_task, timeout=5)
+
+    async def test_cancel_mid_dial_tears_down_silently(self):
+        call = FakeCall.outbound()
+        call.dial_gate = asyncio.Event()
+        transport = AgentDuetTransport(call)
+        seen: list[str] = []
+
+        @transport.event_handler("on_client_connected")
+        async def on_connected(t, payload):
+            seen.append("connected")
+
+        @transport.event_handler("on_client_disconnected")
+        async def on_disconnected(t, payload):
+            seen.append("disconnected")
+
+        worker = make_worker(Pipeline([transport.input(), FrameCapture()]))
+        run_task = await run_worker(worker)
+        await asyncio.sleep(0.1)  # dial spawned, gated on dial_gate
+
+        await worker.cancel(reason="test cancel mid-dial")
+        # worker.cancel() only queues the CancelFrame; wait for it to actually
+        # reach AgentDuetInputTransport.cancel() (call.close() runs) before
+        # releasing the gate, or dial() could race ahead and observe a call
+        # that isn't TERMINATED yet.
+        for _ in range(50):
+            if call.close_calls >= 1:
+                break
+            await asyncio.sleep(0.01)
+        assert call.close_calls >= 1
+        call.dial_gate.set()  # dial() now observes TERMINATED, resolves silently
+
+        await asyncio.wait_for(run_task, timeout=5)
+        assert seen == []
+
+
 class TestRingTime:
     def test_invalid_ring_time_raises_at_construction(self):
         with pytest.raises(ValueError, match="ring_time_seconds"):
