@@ -135,6 +135,10 @@ async def run_call(sm: SessionManager, noti: IncomingCallNotification):
     else:
         logger.info("no WA follow-up: caller is not on WA and WA_FOLLOWUP_TO is unset")
         return
+    # WhatsApp's canonical recipient id (wa_id) is digits-only — incoming
+    # webhooks report '84...' while call notifications carry '+84...'.
+    # Normalize, or the connector's inbox lookup misses the thread.
+    destination = destination.lstrip("+")
 
     try:
         result = await session.send_message(
