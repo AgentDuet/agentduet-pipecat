@@ -76,6 +76,13 @@ class EndCallOnGoodbye(FrameProcessor):
     drain-on-close question: any farewell audio still in the SDK's client
     ring buffer when close() lands is dropped locally, so a truncated
     goodbye here is the signal that the SDK needs a drain-before-close.
+
+    Placement: MUST sit between the STT service and the user context
+    aggregator — the aggregator consumes final TranscriptionFrames and does
+    not push them downstream (llm_response_universal.py), so nothing after
+    it ever sees a transcript. The bot-stopped signal still arrives here
+    because BaseOutputTransport broadcasts BotStoppedSpeakingFrame both
+    downstream and UPSTREAM; this processor sees the upstream copy.
     """
 
     def __init__(self):
@@ -146,13 +153,14 @@ async def run_call(
             # and have no transcript for Smart Turn to use.
             UserTurnProcessor(),
             stt,
+            # Between STT and the user aggregator: sees final transcriptions
+            # (the aggregator consumes them) and the upstream copy of
+            # BotStoppedSpeakingFrame — see the class docstring.
+            EndCallOnGoodbye(),
             aggregators.user(),
             llm,
             tts,
             transport.output(),
-            # Sees the downstream TranscriptionFrame + BotStoppedSpeakingFrame
-            # copies; must sit after the output transport.
-            EndCallOnGoodbye(),
             aggregators.assistant(),
         ]
     )
