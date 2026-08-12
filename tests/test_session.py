@@ -197,3 +197,131 @@ class TestDirectionDetection:
         assert call.state == CallState.NEW
         session = _AgentDuetSession(call, RecordingNotifier())
         assert session._outbound is False
+
+
+class TestOutboundStart:
+    async def test_start_returns_before_dial_resolves(self):
+        call = FakeCall.outbound()
+        call.dial_gate = asyncio.Event()  # never released in this test
+        session = _AgentDuetSession(call, RecordingNotifier())
+        await asyncio.wait_for(session.start(), timeout=1.0)  # must not block on dial
+        assert session._establish_task is not None
+        # start() has no yield points, so the spawned task hasn't run yet —
+        # yield once before checking dial was actually initiated. Do NOT "fix"
+        # a failure here by making start() await the dial: the spawned task IS
+        # the design (spec §5: dial must not stall pipeline startup).
+        await asyncio.sleep(0)
+        assert call.dial_calls == 1
+
+    async def test_dial_success_fires_answered_then_state(self):
+        call = FakeCall.outbound()
+        notifier = RecordingNotifier()
+        session = _AgentDuetSession(call, notifier)
+        await session.start()
+        await session._establish_task
+        assert notifier.names() == ["on_dialout_answered", "on_call_state_updated"]
+        payload = notifier.events[0][1]
+        assert payload.participant.value == "+6533333333"
+        assert payload.state == CallState.LIVE
+
+    async def test_ring_time_passed_through(self):
+        call = FakeCall.outbound()
+        session = _AgentDuetSession(call, RecordingNotifier(), ring_time_seconds=30)
+        await session.start()
+        await session._establish_task
+        assert call.dial_ring_time == 30
+
+    async def test_dial_falsy_fires_error_and_exactly_one_cancel(self):
+        # A falsy dial also fires on_hangup (the SDK force-closes the voice WS,
+        # see verified facts), so the cancel REASON races between "dial failed"
+        # and "remote hangup" — pin the invariants, not the reason string.
+        call = FakeCall.outbound()
+        call.dial_result = CommandResult(success=False, error_code="CALL_UNANSWERED")
+        notifier = RecordingNotifier()
+        session = _AgentDuetSession(call, notifier)
+        await session.start()
+        await session._establish_task
+        idx = notifier.names().index("on_dialout_error")
+        assert notifier.events[idx][1].error_code == "CALL_UNANSWERED"
+        assert len(notifier.cancel_reasons) == 1
+        assert "on_dialout_answered" not in notifier.names()
+        assert "on_dialout_stopped" not in notifier.names()
+
+    async def test_terminated_before_start_fires_error_without_dialing(self):
+        call = FakeCall.outbound()
+        call.state = CallState.TERMINATED
+        notifier = RecordingNotifier()
+        session = _AgentDuetSession(call, notifier)
+        await session.start()
+        assert call.dial_calls == 0
+        assert notifier.events[0][0] == "on_dialout_error"
+        assert notifier.events[0][1].error_code == "CALL_TERMINATED"
+        assert notifier.cancel_reasons == ["dial failed"]
+
+
+class TestOutboundTeardown:
+    async def test_hangup_mid_dial_resolves_task_no_connected_events(self):
+        call = FakeCall.outbound()
+        call.dial_gate = asyncio.Event()
+        notifier = RecordingNotifier()
+        session = _AgentDuetSession(call, notifier)
+        await session.start()
+        await call.trigger_hangup()          # remote gives up while ringing
+        call.dial_gate.set()                 # dial now observes TERMINATED
+        await asyncio.wait_for(session._establish_task, timeout=1.0)
+        names = notifier.names()
+        assert "on_dialout_answered" not in names
+        assert "on_dialout_stopped" not in names
+        assert "on_dialout_error" in names   # CALL_TERMINATED, matrix row 2 twin
+        assert "remote hangup" in notifier.cancel_reasons
+
+    async def test_close_mid_dial_is_silent(self):
+        call = FakeCall.outbound()
+        call.dial_gate = asyncio.Event()
+        notifier = RecordingNotifier()
+        session = _AgentDuetSession(call, notifier)
+        await session.start()
+        await session.close()                # pipeline cancelled mid-dial
+        call.dial_gate.set()
+        await asyncio.wait_for(session._establish_task, timeout=1.0)
+        assert "on_dialout_error" not in notifier.names()
+        assert notifier.cancel_reasons == []  # self-initiated: never cancel
+
+    async def test_answered_then_hangup_full_disconnect_path(self):
+        call = FakeCall.outbound()
+        notifier = RecordingNotifier()
+        session = _AgentDuetSession(call, notifier)
+        await session.start()
+        await session._establish_task
+        await call.trigger_hangup()
+        names = notifier.names()
+        assert names.index("on_before_disconnect") < names.index("on_dialout_stopped")
+        assert names.count("on_dialout_stopped") == 1
+        assert notifier.cancel_reasons == ["remote hangup"]
+
+    async def test_dial_call_error_maps_to_error_event(self):
+        from agentduet.exceptions import CallError
+
+        call = FakeCall.outbound()
+        call.dial_result = CallError("voice WS refused")
+        notifier = RecordingNotifier()
+        session = _AgentDuetSession(call, notifier)
+        await session.start()
+        await session._establish_task
+        idx = notifier.names().index("on_dialout_error")
+        assert notifier.events[idx][1].error_code == "CALL_ERROR"
+        assert notifier.cancel_reasons == ["dial failed"]
+
+
+class TestInboundCallErrorHardening:
+    async def test_answer_call_error_now_reported_not_raised(self):
+        from agentduet.exceptions import CallError
+
+        call = FakeCall()
+        call.answer_result = CallError("voice WS refused")
+        notifier = RecordingNotifier()
+        session = _AgentDuetSession(call, notifier)
+        await session.start()  # must not raise
+        idx = notifier.names().index("on_dialin_error")
+        assert notifier.events[idx][1].error_code == "CALL_ERROR"
+        assert notifier.cancel_reasons == ["answer failed"]
