@@ -138,7 +138,7 @@ class _AgentDuetSession:
     @staticmethod
     def _log_establish_crash(task: asyncio.Task) -> None:
         if not task.cancelled() and task.exception() is not None:
-            logger.exception("dial task crashed", exc_info=task.exception())
+            logger.error("dial task crashed", exc_info=task.exception())
 
     async def _establish(self) -> None:
         """Answer or dial, then fire connected events on a truthy result with
@@ -147,9 +147,7 @@ class _AgentDuetSession:
         so this task never needs external cancellation."""
         try:
             if self._outbound:
-                result = await self._call.dial(
-                    ring_time_seconds=self._ring_time_seconds
-                )
+                result = await self._call.dial(ring_time_seconds=self._ring_time_seconds)
             else:
                 result = await self._call.answer()
         except CallClosedError:
@@ -163,9 +161,7 @@ class _AgentDuetSession:
                 await self._fail_start(_terminated_result())
             else:
                 await self._fail_start(
-                    CommandResult(
-                        success=False, error_code="CALL_ERROR", error_message=str(e)
-                    )
+                    CommandResult(success=False, error_code="CALL_ERROR", error_message=str(e))
                 )
             return
         if not result:
