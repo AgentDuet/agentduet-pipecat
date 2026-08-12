@@ -17,10 +17,9 @@ os.environ.setdefault("NLTK_DISABLE_IMPORT_SECURITY", "1")
 
 import asyncio
 import logging
-import math
-import struct
 import uuid
 
+from _tone import ToneBot
 from agentduet import (
     CallAudioConfig,
     IncomingCallNotification,
@@ -29,16 +28,9 @@ from agentduet import (
 )
 from dotenv import load_dotenv
 from pipecat.audio.vad.silero import SileroVADAnalyzer
-from pipecat.frames.frames import (
-    Frame,
-    InterruptionFrame,
-    OutputAudioRawFrame,
-    UserStoppedSpeakingFrame,
-)
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.worker import PipelineWorker
 from pipecat.processors.audio.vad_processor import VADProcessor
-from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 from pipecat.turns.user_stop import SpeechTimeoutUserTurnStopStrategy
 from pipecat.turns.user_turn_processor import UserTurnProcessor
 from pipecat.turns.user_turn_strategies import UserTurnStrategies
@@ -59,45 +51,6 @@ def _require_env(name: str) -> str:
     if not value:
         raise SystemExit(f"set {name} in the environment or .env")
     return value
-
-
-class ToneBot(FrameProcessor):
-    """Plays a sine tone after each user turn; stops it on interruption."""
-
-    def __init__(self, *, freq: float = 440.0, seconds: float = 5.0, amplitude: float = 0.3):
-        super().__init__()
-        self._freq = freq
-        self._seconds = seconds
-        self._amplitude = amplitude
-        self._gen_task = None
-
-    async def process_frame(self, frame: Frame, direction: FrameDirection):
-        await super().process_frame(frame, direction)
-        if isinstance(frame, InterruptionFrame):
-            if self._gen_task is not None:
-                await self.cancel_task(self._gen_task)
-                self._gen_task = None
-        elif isinstance(frame, UserStoppedSpeakingFrame):
-            if self._gen_task is not None:
-                await self.cancel_task(self._gen_task)
-            self._gen_task = self.create_task(self._play_tone())
-        await self.push_frame(frame, direction)
-
-    async def _play_tone(self):
-        chunk_samples = SAMPLE_RATE // 50  # 20 ms
-        total_chunks = int(self._seconds * 50)
-        peak = int(32767 * self._amplitude)
-        sample_index = 0
-        for _ in range(total_chunks):
-            samples = [
-                int(peak * math.sin(2 * math.pi * self._freq * (sample_index + i) / SAMPLE_RATE))
-                for i in range(chunk_samples)
-            ]
-            sample_index += chunk_samples
-            pcm = struct.pack(f"<{chunk_samples}h", *samples)
-            await self.push_frame(
-                OutputAudioRawFrame(audio=pcm, sample_rate=SAMPLE_RATE, num_channels=1)
-            )
 
 
 async def run_call(sm: SessionManager, noti: IncomingCallNotification):
@@ -129,7 +82,7 @@ async def run_call(sm: SessionManager, noti: IncomingCallNotification):
                     stop=[SpeechTimeoutUserTurnStopStrategy(wait_for_transcript=False)]
                 )
             ),
-            ToneBot(),
+            ToneBot(sample_rate=SAMPLE_RATE),
             transport.output(),
         ]
     )
