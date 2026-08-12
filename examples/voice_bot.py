@@ -1,8 +1,8 @@
 """Native showcase bot: answers an inbound call and runs a real
 Deepgram STT -> OpenAI LLM -> Cartesia TTS cascade. This is the pasted-quickstart
 example — house style matches Pipecat's own transport examples (custom
-main(), native event names, direct construction), no AgentDuet-specific
-plumbing beyond the transport itself.
+main(), native event names, direct construction), no adapter-specific
+plumbing beyond the transport.
 
 Env (from the shell or examples/.env — see examples/.env.example):
 AGENTDUET_API_KEY, AGENTDUET_CONNECTOR_UUID, optional AGENTDUET_BASE_URL,
@@ -136,7 +136,7 @@ async def run_call(
 
     @transport.event_handler("on_dialin_error")
     async def on_dial_error(t, result):
-        logger.error("answer failed: %s", result.error_code)
+        logger.error("answer failed: %s (%s)", result.error_code, result.error_message)
 
     runner = WorkerRunner(handle_sigint=False)
     await runner.add_workers(worker)
