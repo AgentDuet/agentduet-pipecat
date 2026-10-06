@@ -12,6 +12,7 @@ Commands (uv-managed; no CI yet):
 
 - Tests: `uv run pytest`
 - Lint: `uv run ruff check` (format: `uv run ruff format`)
+- Secret-scan hook: `uvx pre-commit install` once per clone (gitleaks, pinned in `.pre-commit-config.yaml`; GitHub secret scanning + push protection are on server-side)
 - Examples: `uv run --group example python examples/inbound_tone_bot.py` (Silero/onnxruntime live in the `example` group, deliberately out of the test env)
 
 `conftest.py` sets `NLTK_DISABLE_IMPORT_SECURITY=1` — nltk's import-security hook false-positives on the project-local `.venv` layout and breaks pipecat imports. Example scripts set it themselves before any pipecat import; any new entrypoint must do the same.

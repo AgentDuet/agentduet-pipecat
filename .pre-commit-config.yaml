@@ -1,0 +1,10 @@
+# Secret scanning before the commit exists — the first layer of the
+# B3Networks engineering-handbook "Secret Scanning" playbook. GitHub push
+# protection (enabled on this repo) is the second layer.
+#
+# Install once per clone:  uvx pre-commit install
+repos:
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.30.1          # pin a release
+    hooks:
+      - id: gitleaks
