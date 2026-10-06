@@ -12,7 +12,7 @@ import asyncio
 import logging
 from dataclasses import dataclass
 
-from agentduet import Address, CallState, CommandResult
+from agentduet import Address, CallOrigin, CallState, CommandResult
 from agentduet.exceptions import CallClosedError, CallError
 
 logger = logging.getLogger(__name__)
@@ -45,15 +45,9 @@ class _AgentDuetSession:
     def __init__(self, call, notifier, *, ring_time_seconds: int = 60):
         self._call = call
         self._notifier = notifier
-        # Direction: on a make_call shell the SDK sets caller == subscriber; on
-        # an IncomingCallNotification attach, caller is the external party. Same
-        # public predicate remote_party uses — state can't discriminate (every
-        # Call constructs in NEW) and _origin is private. Known limit: an
-        # OutgoingCallNotification attach (copilot shape, v1 non-goal) also has
-        # caller == subscriber; dial() on it raises CallStateError, which the
-        # establish path maps to a clean on_dialout_error + cancel. Durable fix
-        # is a public Call.origin on the SDK (feature request filed).
-        self._outbound = call.caller.value == call.subscriber
+        # Only a make_call shell is dialed; SUBSCRIBER and PARTICIPANT calls
+        # were placed by someone else and are answered.
+        self._outbound = call.origin is CallOrigin.AGENT
         self._ring_time_seconds = ring_time_seconds
         if self._outbound:
             self._connected_event = "on_dialout_answered"
@@ -91,8 +85,9 @@ class _AgentDuetSession:
     @property
     def remote_party(self):
         # The remote party is whichever side isn't the subscriber. Track ids
-        # are role-fixed locally (caller 0, callee 1), so this holds for both
-        # call directions without touching the private _origin.
+        # are role-fixed locally (caller 0, callee 1), so this holds for every
+        # origin — including a SUBSCRIBER-origin call, which is answered (not
+        # dialed) yet still has caller == subscriber.
         if self._call.caller.value == self._call.subscriber:
             return self._call.callee
         return self._call.caller
