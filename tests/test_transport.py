@@ -315,6 +315,37 @@ class TestOutboundPipeline:
         await call.trigger_hangup()
         await asyncio.wait_for(run_task, timeout=5)
 
+    async def test_subscriber_leg_answers_with_dialin_alias_pair(self):
+        # A SUBSCRIBER-origin call (@on_outgoing_call -> process_call) used to
+        # be misdetected as dial-out and fail with on_dialout_error.
+        call = FakeCall.subscriber_leg()
+        transport = AgentDuetTransport(call, params=TransportParams(audio_in_enabled=True))
+        seen: list[tuple[str, object]] = []
+
+        for name in ("on_dialin_connected", "on_client_connected", "on_dialout_error"):
+
+            @transport.event_handler(name)
+            async def handler(t, payload, name=name):
+                seen.append((name, payload))
+
+        capture = FrameCapture()
+        worker = make_worker(Pipeline([transport.input(), capture]))
+        run_task = await run_worker(worker)
+        await asyncio.sleep(0.1)
+
+        assert call.answer_calls == 1
+        assert call.dial_calls == 0
+        assert [name for name, _ in seen] == ["on_dialin_connected", "on_client_connected"]
+        assert seen[0][1] is seen[1][1]  # identical payload object
+
+        call.callee.audio_queue.put_nowait(b"\x01\x02" * 80)  # remote party
+        await asyncio.sleep(0.2)
+        audio = [f for f in capture.frames if isinstance(f, InputAudioRawFrame)]
+        assert audio and audio[0].audio == b"\x01\x02" * 80
+
+        await call.trigger_hangup()
+        await asyncio.wait_for(run_task, timeout=5)
+
     async def test_outbound_audio_flows_after_answer(self):
         call = FakeCall.outbound(sample_rate=16000)
         call.dial_gate = asyncio.Event()

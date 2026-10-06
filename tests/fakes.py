@@ -2,9 +2,9 @@
 
 import asyncio
 
-from agentduet import Address, CallEvent, CallState, CommandResult, Network
+from agentduet import Address, CallEvent, CallOrigin, CallState, CommandResult, Network
 from agentduet.audio_config import CallAudioConfig
-from agentduet.exceptions import CallClosedError
+from agentduet.exceptions import CallClosedError, CallStateError
 
 
 class FakeParty:
@@ -35,16 +35,17 @@ class FakeCall:
         caller_value: str = "+6522222222",
         callee_value: str = "+6511111111",
         sample_rate: int = 16000,
+        origin: CallOrigin = CallOrigin.PARTICIPANT,
     ):
         self.id = "call-1"
+        self.origin = origin
         self.subscriber = subscriber
         self.participant = Address(Network.TELCO, caller_value)
         self.caller = FakeParty(caller_value)
         self.callee = FakeParty(callee_value)
         self.audio_config = CallAudioConfig(sample_rate=sample_rate)
         # Real Call.__init__ sets NEW unconditionally; process_call never
-        # changes it. Direction is NOT observable from state — only from the
-        # caller/subscriber relationship.
+        # changes it. Direction is NOT observable from state — only from origin.
         self.state = CallState.NEW
 
         # Scripting knobs
@@ -75,13 +76,30 @@ class FakeCall:
         sample_rate: int = 16000,
     ) -> "FakeCall":
         """An outbound-dial shell as Session.make_call mints it:
-        caller == subscriber, callee == participant == dest (state is NEW
-        for every call; direction lives in the caller/subscriber relation)."""
+        origin AGENT, caller == subscriber, callee == participant == dest."""
+        return cls._subscriber_placed(CallOrigin.AGENT, subscriber, dest_value, sample_rate)
+
+    @classmethod
+    def subscriber_leg(
+        cls,
+        *,
+        subscriber: str = "+6511111111",
+        dest_value: str = "+6533333333",
+        sample_rate: int = 16000,
+    ) -> "FakeCall":
+        """The subscriber's own outgoing leg (@on_outgoing_call -> process_call):
+        origin SUBSCRIBER. Same caller/callee shape as an AGENT shell, but it
+        was placed by the subscriber's line, so it is answered, not dialed."""
+        return cls._subscriber_placed(CallOrigin.SUBSCRIBER, subscriber, dest_value, sample_rate)
+
+    @classmethod
+    def _subscriber_placed(cls, origin, subscriber, dest_value, sample_rate) -> "FakeCall":
         call = cls(
             subscriber=subscriber,
             caller_value=subscriber,
             callee_value=dest_value,
             sample_rate=sample_rate,
+            origin=origin,
         )
         call.participant = Address(Network.TELCO, dest_value)
         return call
@@ -114,6 +132,9 @@ class FakeCall:
     async def dial(self, *, ring_time_seconds: int = 60) -> CommandResult:
         self.dial_calls += 1
         self.dial_ring_time = ring_time_seconds
+        if self.origin is not CallOrigin.AGENT:
+            # Real dial() accepts only a make_call shell.
+            raise CallStateError()
         if self.dial_gate is not None:
             await self.dial_gate.wait()
         if self.state == CallState.TERMINATED and not isinstance(self.dial_result, Exception):

@@ -186,17 +186,37 @@ class TestTeardown:
 
 
 class TestDirectionDetection:
-    async def test_outbound_shell_detected_by_caller_eq_subscriber(self):
+    async def test_agent_origin_shell_is_outbound(self):
         session = _AgentDuetSession(FakeCall.outbound(), RecordingNotifier())
         assert session._outbound is True
 
-    async def test_inbound_call_detected_despite_new_state(self):
-        # Real inbound calls are ALSO CallState.NEW at construction; only the
-        # caller/subscriber relation discriminates.
+    async def test_participant_origin_is_inbound_despite_new_state(self):
+        # Every Call is CallState.NEW at construction; only origin discriminates.
         call = FakeCall()
         assert call.state == CallState.NEW
         session = _AgentDuetSession(call, RecordingNotifier())
         assert session._outbound is False
+
+    async def test_subscriber_origin_is_inbound_despite_caller_eq_subscriber(self):
+        # The subscriber's own outgoing leg has caller == subscriber, exactly
+        # like an AGENT shell — the pair the old caller/subscriber predicate
+        # collapsed. It was placed by someone else, so it is answered.
+        call = FakeCall.subscriber_leg()
+        assert call.caller.value == call.subscriber
+        session = _AgentDuetSession(call, RecordingNotifier())
+        assert session._outbound is False
+
+    async def test_subscriber_origin_answers_and_fires_dialin_events(self):
+        call = FakeCall.subscriber_leg()
+        notifier = RecordingNotifier()
+        session = _AgentDuetSession(call, notifier)
+        await session.start()
+        assert call.answer_calls == 1
+        assert call.dial_calls == 0
+        assert notifier.names() == ["on_dialin_connected", "on_call_state_updated"]
+        assert notifier.cancel_reasons == []
+        # Remote party is still the non-subscriber side: the destination.
+        assert session.remote_party is call.callee
 
 
 class TestOutboundStart:
