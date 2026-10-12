@@ -14,9 +14,9 @@ Requires Python >= 3.12. The quickstart below also needs Pipecat's service extra
 
 ## Inbound quickstart
 
-A *connector* is a provisioned phone/WhatsApp number (or number pool) on the AgentDuet platform; your bot process attaches to one and receives its calls. The API key and connector UUID come from your AgentDuet workspace/portal.
+A *connector* is your agent's registration on the AgentDuet platform: it holds the agent's name, API keys and settings. Phone numbers, WhatsApp numbers and DDuet business accounts are routed to a connector, and one connector can serve several of them. Your bot process attaches to a connector and receives the calls for every number routed to it. The API key and connector UUID come from your AgentDuet workspace/portal.
 
-A complete bot: answers calls on your connector, greets the caller, and runs a Deepgram → Gemini → Deepgram cascade (STT and TTS on one Deepgram key — two vendor keys total). Save as `bot.py`, set `AGENTDUET_API_KEY`, `AGENTDUET_CONNECTOR_UUID`, `DEEPGRAM_API_KEY`, and `GOOGLE_API_KEY`, run `python bot.py`, then call your connector's number.
+A complete bot: answers calls on your connector, greets the caller, and runs a Deepgram → Gemini → Deepgram cascade (STT and TTS on one Deepgram key — two vendor keys total). Save as `bot.py`, set `AGENTDUET_API_KEY`, `AGENTDUET_CONNECTOR_UUID`, `DEEPGRAM_API_KEY`, and `GOOGLE_API_KEY`, run `python bot.py`, then call a number routed to your connector.
 
 ```python
 import os
