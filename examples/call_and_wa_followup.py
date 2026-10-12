@@ -14,7 +14,7 @@ Env (from the shell or examples/.env — see examples/.env.example):
   Optional: WA_API_VERSION (defaults to "v23.0"), WA_FOLLOWUP_TO.
 
 Run:  uv run --group example python examples/call_and_wa_followup.py
-Then call the connector's number. Speak; after you stop, a tone plays for up
+Then call a number routed to the connector. Speak; after you stop, a tone plays for up
 to 5 s, same as inbound_tone_bot.py. Hang up: a WhatsApp follow-up is sent
 in the same session that handled the call.
 

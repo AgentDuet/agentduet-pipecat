@@ -8,7 +8,7 @@ Env (from the shell or examples/.env — see examples/.env.example):
 AGENTDUET_API_KEY, AGENTDUET_CONNECTOR_UUID, optional AGENTDUET_BASE_URL,
 DEEPGRAM_API_KEY (STT and TTS), GOOGLE_API_KEY, optional DEEPGRAM_TTS_VOICE.
 Run:  uv run --group example python examples/voice_bot.py
-Then call the connector's number. The bot greets you first, then converses.
+Then call a number routed to the connector. The bot greets you first, then converses.
 When you say you're done, the LLM says a farewell and calls its hang_up
 tool: the pipeline ends gracefully and the transport closes the call — the
 "pipeline done means call ends" contract, with the LLM deciding when.

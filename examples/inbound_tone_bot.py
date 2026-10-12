@@ -4,7 +4,7 @@ turn, stops the tone on barge-in. No STT/LLM/TTS keys needed.
 Env (from the shell or examples/.env — see examples/.env.example):
 AGENTDUET_API_KEY, AGENTDUET_CONNECTOR_UUID, optional AGENTDUET_BASE_URL.
 Run:  uv run --group example python examples/inbound_tone_bot.py
-Then call the connector's number. Speak; after you stop, a tone plays for up
+Then call a number routed to the connector. Speak; after you stop, a tone plays for up
 to 5 s. Speak over it: it must stop (barge-in). Watch the log for the
 "barge-in: cleared N buffered bytes, ack in M ms" measurement lines.
 """
