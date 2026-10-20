@@ -6,7 +6,7 @@ readme = "README.md"
 requires-python = ">=3.12"
 license = "BSD-2-Clause"
 license-files = ["LICENSE"]
-authors = [{ name = "AgentDuet" }]
+authors = [{ name = "B3Networks Pte Ltd" }]
 keywords = [
     "pipecat",
     "agentduet",
